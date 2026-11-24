@@ -778,6 +778,138 @@ export function buildB1Generator(assets: SharedModelAssets, textures: MinatoText
   return { group, rotor, beaconMat, beaconHalo, captureRing, captureRingMat, progressArc };
 }
 
+export interface CourtyardTerminalVisual {
+  group: THREE.Group;
+  scannerRing: THREE.Mesh;
+  screenMat: THREE.MeshStandardMaterial;
+  beaconMat: THREE.MeshStandardMaterial;
+  beaconHalo: THREE.Sprite;
+  captureRing: THREE.Mesh;
+  captureRingMat: THREE.MeshBasicMaterial;
+  progressArc: THREE.Mesh;
+}
+
+/**
+ * Interactive 1980s Quarantine Med-Data Terminal outside the Sakura Courtyard Med Station.
+ * Starts in standby amber/slate while B1 power is offline, switches to pulsing emerald when Stage 2 unlocks,
+ * and locks cyan once quarantine data is secured.
+ */
+export function buildCourtyardTerminal(
+  assets: SharedModelAssets,
+  textures: MinatoTextureBank,
+): CourtyardTerminalVisual {
+  const group = new THREE.Group();
+
+  const plinthMat = new THREE.MeshStandardMaterial({ color: 0x3b4456, roughness: 0.82, metalness: 0.25 });
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0xd8dfd8, roughness: 0.62, metalness: 0.14 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: 0x263248, roughness: 0.54, metalness: 0.42 });
+
+  // Heavy concrete-and-steel base plinth
+  addPart(group, new THREE.BoxGeometry(1.55, 0.22, 1.15), plinthMat, 0, 0.11, 0);
+
+  // Main medical terminal tower + side protective bumper rails
+  addPart(group, new THREE.BoxGeometry(1.16, 1.52, 0.78), bodyMat, 0, 0.98, 0);
+  addPart(group, new THREE.BoxGeometry(1.26, 0.14, 0.88), trimMat, 0, 1.76, 0);
+  addPart(group, new THREE.BoxGeometry(0.12, 1.38, 0.86), trimMat, -0.62, 0.96, 0);
+  addPart(group, new THREE.BoxGeometry(0.12, 1.38, 0.86), trimMat, 0.62, 0.96, 0);
+
+  // Angled CRT telemetry console screen facing south toward courtyard approach
+  const screenMat = new THREE.MeshStandardMaterial({
+    color: 0x3a4d5c,
+    emissive: 0x456070,
+    emissiveIntensity: 0.35,
+    roughness: 0.25,
+    metalness: 0.15,
+  });
+  const screen = new THREE.Mesh(new THREE.BoxGeometry(0.84, 0.52, 0.08), screenMat);
+  screen.position.set(0, 1.24, 0.4);
+  screen.rotation.x = -0.18;
+  group.add(screen);
+
+  // Medical cross badge on front lower panel
+  const crossMat = new THREE.MeshStandardMaterial({ color: 0x42b86d, roughness: 0.48 });
+  addPart(group, new THREE.BoxGeometry(0.36, 0.1, 0.05), crossMat, 0, 0.56, 0.41);
+  addPart(group, new THREE.BoxGeometry(0.1, 0.36, 0.05), crossMat, 0, 0.56, 0.41);
+
+  // Rooftop antenna mast + rotating holographic data scanner ring
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.07, 0.72, 8), assets.darkMetalMat);
+  mast.position.set(0, 2.15, 0);
+  group.add(mast);
+
+  const beaconMat = new THREE.MeshStandardMaterial({
+    color: 0x6c7c92,
+    emissive: 0x4b5c72,
+    emissiveIntensity: 0.45,
+    roughness: 0.25,
+  });
+  const beacon = new THREE.Mesh(new THREE.OctahedronGeometry(0.2, 0), beaconMat);
+  beacon.position.set(0, 2.56, 0);
+  group.add(beacon);
+
+  const scannerRing = new THREE.Mesh(
+    new THREE.TorusGeometry(0.46, 0.035, 8, 24),
+    new THREE.MeshBasicMaterial({ color: 0x6ee782, transparent: true, opacity: 0.72 }),
+  );
+  scannerRing.position.set(0, 2.28, 0);
+  scannerRing.rotation.x = Math.PI / 2.6;
+  scannerRing.visible = false;
+  group.add(scannerRing);
+
+  const beaconHalo = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: textures.glowHalo,
+      color: 0x6ee782,
+      transparent: true,
+      opacity: 0.22,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
+  beaconHalo.position.set(0, 2.56, 0);
+  beaconHalo.scale.set(3.8, 3.8, 1);
+  group.add(beaconHalo);
+
+  // Diegetic 3D Ground Capture Ring (radius 3.2m matching COURTYARD_TERMINAL.r)
+  const captureRingMat = new THREE.MeshBasicMaterial({
+    color: 0x6c7c92,
+    transparent: true,
+    opacity: 0.28,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const captureRing = new THREE.Mesh(new THREE.RingGeometry(2.92, 3.2, 36), captureRingMat);
+  captureRing.rotation.x = -Math.PI / 2;
+  captureRing.position.y = 0.055;
+  group.add(captureRing);
+
+  const progressArc = new THREE.Mesh(
+    new THREE.CircleGeometry(2.86, 32),
+    new THREE.MeshBasicMaterial({
+      color: 0x6ee782,
+      transparent: true,
+      opacity: 0.24,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    }),
+  );
+  progressArc.rotation.x = -Math.PI / 2;
+  progressArc.position.y = 0.048;
+  progressArc.scale.setScalar(0.01);
+  progressArc.visible = false;
+  group.add(progressArc);
+
+  return {
+    group,
+    scannerRing,
+    screenMat,
+    beaconMat,
+    beaconHalo,
+    captureRing,
+    captureRingMat,
+    progressArc,
+  };
+}
+
 /**
  * Warm Japanese iron garden lantern for the expanded Sakura Courtyard.
  */

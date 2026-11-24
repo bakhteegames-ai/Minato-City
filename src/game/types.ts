@@ -105,6 +105,29 @@ export interface GeneratorHudState {
   inRange: boolean;
 }
 
+export interface CourtyardTerminalHudState {
+  unlocked: boolean;
+  secured: boolean;
+  charging: boolean;
+  progress: number;
+  inRange: boolean;
+}
+
+export interface TacticalStateHud {
+  slowMoActive: boolean;
+  focus: number;
+  maxFocus: number;
+  inLowCover: boolean;
+  onHighGround: boolean;
+}
+
+export interface EvacHoldHudState {
+  active: boolean;
+  holding: boolean;
+  remainingSec: number;
+  totalSec: number;
+}
+
 export interface MinimapDot {
   u: number;
   v: number;
@@ -125,6 +148,10 @@ export interface MinimapSnapshot {
   generatorU: number;
   generatorV: number;
   generatorActive: boolean;
+  terminalU: number;
+  terminalV: number;
+  terminalUnlocked: boolean;
+  terminalSecured: boolean;
   evacU: number;
   evacV: number;
   evacActive: boolean;
@@ -173,6 +200,9 @@ export interface HudSnapshot {
   shutters: ShutterHudState[];
   activeReload: ActiveReloadHudState;
   generator: GeneratorHudState;
+  courtyardTerminal: CourtyardTerminalHudState;
+  tactical: TacticalStateHud;
+  evacHold: EvacHoldHudState;
   minimap: MinimapSnapshot;
   units: UnitHudState[];
   assetSlots: AssetSlotStatus[];

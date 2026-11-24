@@ -162,6 +162,48 @@ export function DistrictMinimap({ minimap }: DistrictMinimapProps) {
               </text>
             </g>
 
+            {/* Sakura Courtyard Med-Data Terminal Marker (Stage 2) */}
+            <g transform={`translate(${px(minimap.terminalU)}, ${py(minimap.terminalV)})`}>
+              <rect
+                x="-5"
+                y="-5"
+                width="10"
+                height="10"
+                fill={
+                  minimap.terminalSecured
+                    ? '#10343c'
+                    : minimap.terminalUnlocked
+                      ? '#102e1f'
+                      : '#171c2b'
+                }
+                stroke={
+                  minimap.terminalSecured
+                    ? '#4ce0e8'
+                    : minimap.terminalUnlocked
+                      ? '#6ee782'
+                      : '#647294'
+                }
+                strokeWidth="1.2"
+              />
+              <text
+                x="0"
+                y="2.6"
+                textAnchor="middle"
+                fill={
+                  minimap.terminalSecured
+                    ? '#4ce0e8'
+                    : minimap.terminalUnlocked
+                      ? '#6ee782'
+                      : '#8190b5'
+                }
+                fontSize="6.8"
+                fontWeight="900"
+                fontFamily="Chakra Petch, sans-serif"
+              >
+                M
+              </text>
+            </g>
+
             {/* Elevated South Tactical Overlook Deck (+1.5m High Ground) */}
             <rect x="65" y="106" width="38" height="10" fill="#232c48" stroke="#f5b971" strokeOpacity="0.65" strokeWidth="0.9" />
             <text x="68" y="113" fill="#f5b971" fontSize="5.2" fontWeight="700" fontFamily="Chakra Petch, sans-serif">

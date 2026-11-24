@@ -346,6 +346,84 @@ test('weapon spread tightens when stationary, reserve ammo decrements on reload,
   assert.equal(bled.bleedoutTimer, 0);
 });
 
+import {
+  computeTacticalCombatModifiers,
+  COURTYARD_TERMINAL,
+  EVAC_HOLD_SEC,
+  isUnitInLowCover,
+  TACTICAL_FOCUS_MAX,
+  TACTICAL_SLOWMO_SCALE,
+  updateCourtyardTerminal,
+  updateEvacHoldCountdown,
+  updateTacticalFocus,
+} from './rules';
 
+test('tactical slow-mo focus dilates simulation time, drains cleanly, and regenerates when inactive', () => {
+  const activeStep = updateTacticalFocus(TACTICAL_FOCUS_MAX, true, 1.0);
+  assert.equal(activeStep.slowMoActive, true);
+  assert.equal(activeStep.timeScale, TACTICAL_SLOWMO_SCALE);
+  assert.equal(activeStep.focus, TACTICAL_FOCUS_MAX - 1.0);
 
+  const depleted = updateTacticalFocus(0.2, true, 0.5);
+  assert.equal(depleted.slowMoActive, false);
+  assert.equal(depleted.timeScale, 1.0);
+  assert.equal(depleted.focus, 0);
 
+  const regen = updateTacticalFocus(1.0, false, 1.0);
+  assert.equal(regen.slowMoActive, false);
+  assert.ok(regen.focus > 1.4 && regen.focus <= TACTICAL_FOCUS_MAX);
+});
+
+test('low cover and elevated Overlook high ground apply real combat bonuses', () => {
+  const boxes: ColliderBox[] = [
+    { x1: -2, z1: -2, x2: 2, z2: 2, tall: false },
+    { x1: 10, z1: 10, x2: 14, z2: 14, tall: true },
+  ];
+  assert.equal(isUnitInLowCover(2.8, 0, boxes), true);
+  assert.equal(isUnitInLowCover(14.5, 12, boxes), false); // tall wall is not low cover
+  assert.equal(isUnitInLowCover(6.0, 0, boxes), false);
+
+  const openStreet = computeTacticalCombatModifiers(0, false);
+  assert.equal(openStreet.damageMult, 1.0);
+  assert.equal(openStreet.rangedDamageTakenMult, 1.0);
+  assert.equal(openStreet.inLowCover, false);
+  assert.equal(openStreet.onHighGround, false);
+
+  const lowCoverMods = computeTacticalCombatModifiers(0, true);
+  assert.equal(lowCoverMods.rangedDamageTakenMult, 0.6);
+  assert.ok(lowCoverMods.spreadMult < 0.8);
+
+  const highGroundCover = computeTacticalCombatModifiers(OVERLOOK_DECK.height, true);
+  assert.equal(highGroundCover.onHighGround, true);
+  assert.equal(highGroundCover.damageMult, 1.2);
+  assert.ok(highGroundCover.spreadMult < lowCoverMods.spreadMult);
+});
+
+test('Stage 2 Courtyard Med-Data Terminal and Stage 3 Evac Hold countdown progress deterministically', () => {
+  // Locked terminal ignores presence until B1 power is restored
+  const locked = updateCourtyardTerminal(0, true, 1.0, false, false);
+  assert.equal(locked.progress, 0);
+  assert.equal(locked.securedNow, false);
+
+  // Unlocked terminal captures inside zone and secures at 1.0
+  const half = updateCourtyardTerminal(0, true, COURTYARD_TERMINAL.captureTime * 0.5, true, false);
+  assert.ok(half.progress >= 0.49 && !half.securedNow);
+  const done = updateCourtyardTerminal(half.progress, true, COURTYARD_TERMINAL.captureTime * 0.6, true, false);
+  assert.equal(done.progress, 1);
+  assert.equal(done.securedNow, true);
+
+  // Evac hold counts down from EVAC_HOLD_SEC and recovers slightly if player steps out
+  const h1 = updateEvacHoldCountdown(EVAC_HOLD_SEC, true, 3.0, true);
+  assert.equal(h1.remainingSec, EVAC_HOLD_SEC - 3.0);
+  assert.equal(h1.extractedNow, false);
+  const out = updateEvacHoldCountdown(h1.remainingSec, false, 1.0, true);
+  assert.ok(out.remainingSec > h1.remainingSec);
+  const extracted = updateEvacHoldCountdown(0.5, true, 0.8, true);
+  assert.equal(extracted.extractedNow, true);
+  assert.equal(extracted.remainingSec, 0);
+
+  // Priority waypoint points to objective when active and no boss/evac overrides
+  const objWp = computePriorityWaypoint(0, 0, null, [{ x: 2, z: 2 }], false, { x: COURTYARD_TERMINAL.x, z: COURTYARD_TERMINAL.z });
+  assert.equal(objWp?.kind, 'objective');
+  assert.equal(objWp?.x, COURTYARD_TERMINAL.x);
+});

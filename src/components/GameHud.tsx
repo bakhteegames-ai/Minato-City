@@ -10,6 +10,7 @@ interface GameHudProps {
   onTriggerSkill: (idx: number) => void;
   onTriggerReload: () => void;
   onCycleStance: () => void;
+  onToggleSlowMo: () => void;
   onThrowFlare: () => void;
   onToggleInspect: () => void;
   onCycleMood: () => void;
@@ -67,6 +68,7 @@ export function GameHud({
   onTriggerSkill,
   onTriggerReload,
   onCycleStance,
+  onToggleSlowMo,
   onThrowFlare,
   onToggleInspect,
   onCycleMood,
@@ -79,6 +81,10 @@ export function GameHud({
   const [dockCollapsed, setDockCollapsed] = useState(false);
   const ar = hud.activeReload;
   const stanceMeta = getStanceMeta(hud.stance);
+  const focusPct =
+    hud.tactical.maxFocus > 0
+      ? Math.max(0, Math.min(100, (hud.tactical.focus / hud.tactical.maxFocus) * 100))
+      : 0;
 
   return (
     <div className="fixed inset-0 z-10 pointer-events-none flex flex-col justify-between p-3 sm:p-4">
@@ -92,13 +98,42 @@ export function GameHud({
         />
       )}
 
+      {/* Subtle cool tactical rim when 0.22x Slow-Mo Command Mode is active */}
+      {hud.tactical.slowMoActive && !hud.inspectMode && (
+        <div
+          className="fixed inset-0 pointer-events-none border-2 border-[#4ce0e8]/45"
+          style={{
+            boxShadow: 'inset 0 0 64px rgba(76, 224, 232, 0.22)',
+          }}
+        />
+      )}
+
       {/* TOP BAR: Compact perimeter corners, center kept clear */}
       <div className="flex items-start justify-between gap-3">
-        {/* Top-left: Zone & Objective Plaque */}
-        <div className="bg-[#0d1122]/92 border border-[#2c365c] px-3.5 py-2.5 max-w-[360px] shadow-[3px_3px_0_rgba(7,9,18,0.85)]">
-          <div className="flex items-center gap-2">
-            <span className="font-display text-xs font-bold tracking-[0.12em] text-[#4ce0e8] uppercase truncate">
-              {hud.zoneName.replace(/\s*\/\/\s*/g, ' · ')}
+        {/* Top-left: Zone, 3-Stage Operation Strip & Objective Plaque */}
+        <div className="bg-[#0d1122]/92 border border-[#2c365c] px-3.5 py-2.5 max-w-[400px] shadow-[3px_3px_0_rgba(7,9,18,0.85)]">
+          <div className="font-display text-xs font-bold tracking-[0.11em] text-[#4ce0e8] uppercase">
+            {hud.zoneName.replace(/\s*\/\/\s*/g, ' · ')}
+          </div>
+          <div className="mt-1 flex items-center gap-2 font-display text-[9px] font-bold tracking-[0.13em] uppercase">
+            <span className={hud.generator.active ? 'text-[#4ce0e8]' : 'text-[#f5b971]'}>
+              {hud.generator.active ? '01 B1 ГОТОВО' : '01 ГЕНЕРАТОР B1'}
+            </span>
+            <span className="text-[#4a577d]">·</span>
+            <span
+              className={
+                hud.courtyardTerminal.secured
+                  ? 'text-[#4ce0e8]'
+                  : hud.courtyardTerminal.unlocked
+                    ? 'text-[#6ee782]'
+                    : 'text-[#606d91]'
+              }
+            >
+              {hud.courtyardTerminal.secured ? '02 ДВОР ГОТОВО' : '02 ДАННЫЕ M'}
+            </span>
+            <span className="text-[#4a577d]">·</span>
+            <span className={hud.evacHold.active ? 'text-[#4ce0e8]' : hud.phase >= 3 ? 'text-[#ff5a72]' : 'text-[#606d91]'}>
+              03 ТАНК / ЭВАК
             </span>
           </div>
           <p className="mt-1 text-xs leading-snug text-[#f4d8a2]">{hud.objective}</p>
@@ -299,7 +334,7 @@ export function GameHud({
 
         {/* Contextual B1 Emergency Generator Charge Progress Bar */}
         {!hud.generator.active && (hud.generator.inRange || hud.generator.progress > 0.02) && !hud.inspectMode && (
-          <div className="mb-2 w-[260px] bg-[#0d1122]/95 border border-[#f5b971] px-3 py-1.5 shadow-[3px_3px_0_rgba(7,9,18,0.9)]">
+          <div className="mb-2 w-[270px] bg-[#0d1122]/95 border border-[#f5b971] px-3 py-1.5 shadow-[3px_3px_0_rgba(7,9,18,0.9)]">
             <div className="flex items-center justify-between font-display text-[10px] font-bold tracking-[0.12em] uppercase mb-1">
               <span className="text-[#f5b971]">ЗАПУСК ГЕНЕРАТОРА B1</span>
               <span className="text-[#4ce0e8] tabular-nums">{Math.round(hud.generator.progress * 100)}%</span>
@@ -308,6 +343,51 @@ export function GameHud({
               <div
                 className="h-full bg-[#4ce0e8] transition-[width] duration-75"
                 style={{ width: `${Math.min(100, hud.generator.progress * 100)}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Contextual Stage 2 Courtyard Med-Data Terminal Capture Bar */}
+        {!hud.courtyardTerminal.secured &&
+          (hud.courtyardTerminal.inRange || hud.courtyardTerminal.progress > 0.02) &&
+          !hud.inspectMode && (
+            <div className="mb-2 w-[280px] bg-[#0d1122]/95 border border-[#6ee782] px-3 py-1.5 shadow-[3px_3px_0_rgba(7,9,18,0.9)]">
+              <div className="flex items-center justify-between font-display text-[10px] font-bold tracking-[0.12em] uppercase mb-1">
+                <span className="text-[#6ee782]">
+                  {hud.courtyardTerminal.unlocked ? 'СБОР МЕД-ДАННЫХ (M)' : 'НЕТ ПИТАНИЯ — НУЖЕН B1'}
+                </span>
+                <span className="text-[#4ce0e8] tabular-nums">
+                  {Math.round(hud.courtyardTerminal.progress * 100)}%
+                </span>
+              </div>
+              <div className="h-2 bg-[#1b2238] border border-[#2f3b64] overflow-hidden">
+                <div
+                  className="h-full bg-[#6ee782] transition-[width] duration-75"
+                  style={{ width: `${Math.min(100, hud.courtyardTerminal.progress * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+        {/* Contextual Stage 3 Evacuation 7s Hold Bar */}
+        {hud.evacHold.active && !hud.inspectMode && (
+          <div className="mb-2 w-[290px] bg-[#0d1122]/95 border border-[#4ce0e8] px-3 py-1.5 shadow-[3px_3px_0_rgba(7,9,18,0.9)]">
+            <div className="flex items-center justify-between font-display text-[10px] font-bold tracking-[0.12em] uppercase mb-1">
+              <span className="text-[#4ce0e8]">
+                {hud.evacHold.holding ? 'УДЕРЖАНИЕ ЭВАКУАЦИИ' : 'ВОЙДИТЕ В ЗОНУ ЭВАКУАЦИИ [F]'}
+              </span>
+              <span className="text-white tabular-nums">{hud.evacHold.remainingSec.toFixed(1)}С</span>
+            </div>
+            <div className="h-2 bg-[#1b2238] border border-[#2f3b64] overflow-hidden">
+              <div
+                className="h-full bg-[#4ce0e8] transition-[width] duration-75"
+                style={{
+                  width: `${Math.min(
+                    100,
+                    Math.max(0, ((hud.evacHold.totalSec - hud.evacHold.remainingSec) / hud.evacHold.totalSec) * 100),
+                  )}%`,
+                }}
               />
             </div>
           </div>
@@ -365,6 +445,30 @@ export function GameHud({
           </div>
         )}
 
+        {/* Active Tactical Positioning & Slow-Mo Command Readout */}
+        {!hud.inspectMode && (hud.tactical.inLowCover || hud.tactical.onHighGround || hud.tactical.slowMoActive) && (
+          <div
+            data-testid="tactical-status-strip"
+            className="mb-1.5 flex items-center gap-2 font-display text-[10px] font-bold tracking-[0.13em] uppercase"
+          >
+            {hud.tactical.slowMoActive && (
+              <span className="bg-[#0b1f2a]/95 border border-[#4ce0e8] px-2.5 py-0.5 text-[#4ce0e8]">
+                ТАКТИКА 0.22× · [ПРОБЕЛ]
+              </span>
+            )}
+            {hud.tactical.onHighGround && (
+              <span className="bg-[#21180b]/95 border border-[#f5b971] px-2.5 py-0.5 text-[#f5b971]">
+                ВЫСОТА +20% УРОН
+              </span>
+            )}
+            {hud.tactical.inLowCover && (
+              <span className="bg-[#0e1f1c]/95 border border-[#6ee782] px-2.5 py-0.5 text-[#6ee782]">
+                УКРЫТИЕ −40% ОГОНЬ
+              </span>
+            )}
+          </div>
+        )}
+
         <button
           type="button"
           tabIndex={-1}
@@ -379,7 +483,7 @@ export function GameHud({
         </button>
 
         {!dockCollapsed && (
-          <div className="pointer-events-auto w-full max-w-[980px] flex flex-wrap items-stretch justify-center gap-2">
+          <div className="pointer-events-auto w-full max-w-[1160px] flex flex-wrap lg:flex-nowrap items-stretch justify-center gap-2">
             {/* 4 Squad Cards */}
             {hud.units.map((u, idx) => {
               const hpPct = Math.max(0, Math.min(100, (u.hp / u.maxHp) * 100));
@@ -390,7 +494,7 @@ export function GameHud({
               return (
                 <div
                   key={u.id}
-                  className={`relative flex-1 min-w-[150px] max-w-[185px] bg-[#0d1122]/92 border px-2.5 py-2 transition-colors ${
+                  className={`relative flex-1 min-w-[140px] max-w-[174px] bg-[#0d1122]/92 border px-2.5 py-2 transition-colors ${
                     u.down
                       ? 'border-[#ff3b52]/80 opacity-60'
                       : u.active
@@ -503,8 +607,44 @@ export function GameHud({
               );
             })}
 
-            {/* Tactical Utility Readout: Squad Stance [Q] + Kills + Flare [F] */}
-            <div className="bg-[#0d1122]/92 border border-[#f5b971]/45 px-2.5 py-2 flex items-center gap-2.5">
+            {/* Tactical Utility Readout: Slow-Mo Focus [Пробел] + Squad Stance [Q] + Kills + Flare [F] */}
+            <div className="bg-[#0d1122]/92 border border-[#f5b971]/45 px-2.5 py-2 flex items-center gap-2">
+              <button
+                type="button"
+                tabIndex={-1}
+                data-testid="tactical-slowmo-btn"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  onToggleSlowMo();
+                }}
+                aria-label="Тактическое замедление времени"
+                title="Тактический фокус 0.22× [Пробел]"
+                className={`flex flex-col items-stretch px-2.5 py-1 border cursor-pointer min-w-[92px] transition-colors ${
+                  hud.tactical.slowMoActive
+                    ? 'bg-[#10303d] border-[#4ce0e8]'
+                    : 'bg-[#141c34] border-[#3a4a78] hover:border-[#4ce0e8]'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-1 font-display text-[9px] font-bold tracking-wider uppercase">
+                  <span className={hud.tactical.slowMoActive ? 'text-[#4ce0e8]' : 'text-[#9db0d9]'}>
+                    ТАКТИКА
+                  </span>
+                  <span className="text-[#dce6ff] tabular-nums">{hud.tactical.focus.toFixed(1)}с</span>
+                </div>
+                <div className="mt-1 h-1.5 bg-[#0c1120] overflow-hidden">
+                  <div
+                    className="h-full transition-[width] duration-75"
+                    style={{
+                      width: `${focusPct}%`,
+                      backgroundColor: hud.tactical.slowMoActive ? '#4ce0e8' : '#7aa2d8',
+                    }}
+                  />
+                </div>
+                <span className="mt-0.5 text-[8px] font-display tracking-wider text-[#8fa4cc] text-left uppercase">
+                  [ПРОБЕЛ]
+                </span>
+              </button>
+
               <button
                 type="button"
                 tabIndex={-1}
@@ -514,7 +654,7 @@ export function GameHud({
                 }}
                 aria-label={`Сменить приказ отряду: ${stanceMeta.label}`}
                 title="Приказ отряду [Q]: Следовать / Держать / Фокус"
-                className="flex flex-col items-start px-2.5 py-1 bg-[#141c34] border hover:brightness-110 cursor-pointer min-w-[92px]"
+                className="flex flex-col items-start px-2.5 py-1 bg-[#141c34] border hover:brightness-110 cursor-pointer min-w-[88px]"
                 style={{ borderColor: stanceMeta.color }}
               >
                 <span className="font-display text-[9px] font-bold tracking-wider text-[#9db0d9] uppercase">

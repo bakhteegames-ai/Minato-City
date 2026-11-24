@@ -231,21 +231,26 @@ export function getWaveSpawns(phase: number): WaveSpawnSpec[] {
   ];
 }
 
-export function getPhaseObjective(phase: number, bossDefeated: boolean, generatorActive = false): string {
+export function getPhaseObjective(
+  phase: number,
+  bossDefeated: boolean,
+  generatorActive = false,
+  courtyardSecured = false,
+): string {
   if (bossDefeated) {
-    return 'Танк уничтожен! Выведите отряд в зону эвакуации [F] на перекрёстке.';
+    return 'Танк уничтожен! Удержите зону эвакуации [F] на перекрёстке 7 сек.';
   }
   if (phase === 1) {
     return generatorActive
-      ? 'Питание B1 активно (+15% темп)! Зачистите перекрёсток от орды из галереи.'
-      : 'Зачистите перекрёсток. Фланги открыты через магазин «マルフジ商店» и паркинг B1.';
+      ? 'Питание B1 восстановлено! Прорывайтесь к терминалу во Дворе Сакуры.'
+      : 'Этап 1: Прорвитесь на восток в паркинг B1 и запустите аварийный генератор G.';
   }
   if (phase === 2) {
-    return generatorActive
-      ? 'Прорыв бронированной орды — бейте Гранатой [3] и Рельсой [4], используйте проходы!'
-      : 'Прорыв бронированной орды! Запустите генератор ⚡ B1 в паркинге для усиления отряда.';
+    return courtyardSecured
+      ? 'Мед-данные получены! Готовьтесь к прорыву Танка из торговой галереи.'
+      : 'Этап 2: Через магазин «マルフジ商店» или проход зайдите во Двор Сакуры и заберите данные M.';
   }
-  return '⚠ ТАНК прорвался из тумана галереи! Избегайте ударов по земле и бейте бронебойным огнём.';
+  return 'Этап 3: ТАНК прорвался из галереи! Займите эстакаду (+20% урона), используйте [Пробел] и бейте с флангов.';
 }
 
 export function getZoneName(x: number, z: number): string {
@@ -326,7 +331,7 @@ export const BARREL_SPAWNS: readonly BarrelSpawnSpec[] = [
 export interface WaypointTarget {
   x: number;
   z: number;
-  kind: 'evac' | 'boss' | 'threat';
+  kind: 'evac' | 'boss' | 'threat' | 'objective';
 }
 
 export function computePriorityWaypoint(
@@ -335,12 +340,16 @@ export function computePriorityWaypoint(
   bossPos: { x: number; z: number } | null,
   enemies: ReadonlyArray<{ x: number; z: number }>,
   evacReady: boolean,
+  objectivePos: { x: number; z: number } | null = null,
 ): WaypointTarget | null {
   if (evacReady) {
     return { x: EVAC_ZONE.x, z: EVAC_ZONE.z, kind: 'evac' };
   }
   if (bossPos) {
     return { x: bossPos.x, z: bossPos.z, kind: 'boss' };
+  }
+  if (objectivePos) {
+    return { x: objectivePos.x, z: objectivePos.z, kind: 'objective' };
   }
   let best: { x: number; z: number } | null = null;
   let bestDistSq = Infinity;
@@ -1103,7 +1112,151 @@ export function updateDownedUnit(
   };
 }
 
+// =========================================================================
+// TACTICAL VERTICAL SLICE: 3-STAGE OPERATION, SLOW-MO FOCUS, COVER & HIGH GROUND
+// =========================================================================
 
+export const COURTYARD_TERMINAL = {
+  x: -21.6,
+  z: -18.8,
+  r: 3.2,
+  captureTime: 2.2,
+} as const;
 
+export const EVAC_HOLD_SEC = 7.0;
+export const TACTICAL_FOCUS_MAX = 5.0;
+export const TACTICAL_SLOWMO_SCALE = 0.22;
+export const TACTICAL_FOCUS_REGEN_PER_SEC = 0.55;
+export const TACTICAL_FOCUS_KILL_BONUS = 0.85;
+export const HIGH_GROUND_Y_THRESHOLD = 1.1;
 
+export interface CourtyardTerminalStepResult {
+  progress: number;
+  securedNow: boolean;
+}
 
+export function updateCourtyardTerminal(
+  currentProgress: number,
+  insideZone: boolean,
+  dt: number,
+  unlocked: boolean,
+  alreadySecured: boolean,
+): CourtyardTerminalStepResult {
+  if (alreadySecured) {
+    return { progress: 1, securedNow: false };
+  }
+  if (!unlocked) {
+    return { progress: 0, securedNow: false };
+  }
+  if (insideZone) {
+    const next = Math.min(1, currentProgress + dt / COURTYARD_TERMINAL.captureTime);
+    return { progress: next, securedNow: next >= 1 };
+  }
+  const decayed = Math.max(0, currentProgress - dt * 0.28);
+  return { progress: decayed, securedNow: false };
+}
+
+export interface EvacHoldStepResult {
+  remainingSec: number;
+  extractedNow: boolean;
+}
+
+export function updateEvacHoldCountdown(
+  currentRemainingSec: number,
+  insideZone: boolean,
+  dt: number,
+  evacActive: boolean,
+): EvacHoldStepResult {
+  if (!evacActive) {
+    return { remainingSec: EVAC_HOLD_SEC, extractedNow: false };
+  }
+  if (insideZone) {
+    const next = Math.max(0, currentRemainingSec - dt);
+    return { remainingSec: next, extractedNow: next <= 0 };
+  }
+  const recovered = Math.min(EVAC_HOLD_SEC, currentRemainingSec + dt * 0.65);
+  return { remainingSec: recovered, extractedNow: false };
+}
+
+export interface TacticalFocusStepResult {
+  focus: number;
+  slowMoActive: boolean;
+  timeScale: number;
+}
+
+export function updateTacticalFocus(
+  currentFocus: number,
+  requestedActive: boolean,
+  realDt: number,
+): TacticalFocusStepResult {
+  if (requestedActive && currentFocus > 0.04) {
+    const next = Math.max(0, currentFocus - realDt);
+    const stillActive = next > 0.001;
+    return {
+      focus: next,
+      slowMoActive: stillActive,
+      timeScale: stillActive ? TACTICAL_SLOWMO_SCALE : 1.0,
+    };
+  }
+  const regen = Math.min(TACTICAL_FOCUS_MAX, currentFocus + realDt * TACTICAL_FOCUS_REGEN_PER_SEC);
+  return {
+    focus: regen,
+    slowMoActive: false,
+    timeScale: 1.0,
+  };
+}
+
+/**
+ * Checks whether a unit is hugging any low tactical cover (cars, barricades, benches, counters, parapets).
+ */
+export function isUnitInLowCover(
+  x: number,
+  z: number,
+  colliders: readonly ColliderBox[],
+  margin = 1.35,
+): boolean {
+  for (let i = 0; i < colliders.length; i++) {
+    const c = colliders[i];
+    if (c.tall) continue;
+    const cx = Math.max(c.x1, Math.min(x, c.x2));
+    const cz = Math.max(c.z1, Math.min(z, c.z2));
+    const dx = x - cx;
+    const dz = z - cz;
+    if (dx * dx + dz * dz <= margin * margin) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export interface TacticalCombatModifiers {
+  damageMult: number;
+  spreadMult: number;
+  rangedDamageTakenMult: number;
+  inLowCover: boolean;
+  onHighGround: boolean;
+}
+
+/**
+ * Computes real tactical positioning rewards:
+ * - Standing on the Elevated Overlook Deck (+1.5m) grants +20% weapon damage & tighter spread.
+ * - Hugging Low Cover grants -40% incoming ranged/acid damage & tighter spread.
+ */
+export function computeTacticalCombatModifiers(
+  terrainY: number,
+  inLowCover: boolean,
+): TacticalCombatModifiers {
+  const onHighGround = terrainY >= HIGH_GROUND_Y_THRESHOLD;
+  const damageMult = onHighGround ? 1.2 : 1.0;
+  let spreadMult = 1.0;
+  if (onHighGround) spreadMult *= 0.82;
+  if (inLowCover) spreadMult *= 0.72;
+  const rangedDamageTakenMult = inLowCover ? 0.6 : 1.0;
+  return {
+    damageMult,
+    spreadMult,
+    rangedDamageTakenMult,
+    inLowCover,
+    onHighGround,
+  };
+}

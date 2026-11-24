@@ -6,6 +6,7 @@ import type { MinatoTextureBank } from './textures';
 import {
   B1_GENERATOR,
   B1_PIT,
+  COURTYARD_TERMINAL,
   OVERLOOK_DECK,
   SHUTTER_SPECS,
   getTerrainHeightAt,
@@ -15,6 +16,7 @@ import {
   buildB1Generator,
   buildConvexTrafficMirror,
   buildCourtyardLantern,
+  buildCourtyardTerminal,
   buildParkBench,
   buildParkedBicycle,
   buildSakuraTree,
@@ -22,6 +24,7 @@ import {
   buildSecurityShutterVisual,
   buildWaterTower,
   type B1GeneratorVisual,
+  type CourtyardTerminalVisual,
   type SecurityShutterVisual,
   type SharedModelAssets,
 } from './models';
@@ -81,6 +84,7 @@ export interface MinatoWorldRefs {
   vehicles: VehicleSlotInstance[];
   shutters: SecurityShutterVisual[];
   b1Generator: B1GeneratorVisual;
+  courtyardTerminal: CourtyardTerminalVisual;
   parkCyanLight: THREE.PointLight;
   floodHalo: THREE.Sprite;
   lighthouseBeam: THREE.Mesh;
@@ -959,6 +963,18 @@ export function buildMinatoWorld(
   addSignPlane(textures.signMed, -24.25, 2.9, -21.4, 5.4, 1.55, 0, 0x6ee782, 1.05);
   addGlowHalo(-24.25, 2.9, -21.1, 0x6ee782, 6.4, 3.4, 0.44);
 
+  // Stage 2 Objective: Quarantine Med-Data Terminal outside Sakura Courtyard Med Station
+  const courtyardTerminal = buildCourtyardTerminal(assets, textures);
+  courtyardTerminal.group.position.set(COURTYARD_TERMINAL.x, 0.2, COURTYARD_TERMINAL.z);
+  scene.add(courtyardTerminal.group);
+  colliders.push({
+    x1: COURTYARD_TERMINAL.x - 0.78,
+    z1: COURTYARD_TERMINAL.z - 0.58,
+    x2: COURTYARD_TERMINAL.x + 0.78,
+    z2: COURTYARD_TERMINAL.z + 0.58,
+    tall: false,
+  });
+
   // =========================================================================
   // LANDMARK 6 (EAST): SUNKEN PARKING «B1 / 立体駐車場» (-1.25m) + SLOPED RAMP + GENERATOR
   // =========================================================================
@@ -1595,6 +1611,7 @@ export function buildMinatoWorld(
     vehicles,
     shutters,
     b1Generator,
+    courtyardTerminal,
     parkCyanLight,
     floodHalo,
     lighthouseBeam,

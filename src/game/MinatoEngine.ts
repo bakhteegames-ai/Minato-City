@@ -39,7 +39,6 @@ import {
   B1_GENERATOR,
   BARREL_SPAWNS,
   canClaimMeleeToken,
-  canExtract,
   clampDelta,
   computeBarrelExplosionDamage,
   computeDirectionalArmorDamage,
@@ -49,12 +48,15 @@ import {
   computePriorityWaypoint,
   computeRunGrade,
   computeSpatialPan,
+  computeTacticalCombatModifiers,
   computeWeaponSpread,
   consumeReserveForReload,
+  COURTYARD_TERMINAL,
   cycleSquadStance,
   DOWNED_BLEEDOUT_SEC,
   ENEMY_ARCHETYPES,
   evaluateActiveReload,
+  EVAC_HOLD_SEC,
   EVAC_ZONE,
   getMoodPostProcessConfig,
   getPhaseObjective,
@@ -64,6 +66,7 @@ import {
   getZoneName,
   hasLineOfSight,
   isPointInsideTallWall,
+  isUnitInLowCover,
   MAX_FLARE_AMMO,
   resolveCircleBox,
   REVIVE_INTERACT_RADIUS,
@@ -71,9 +74,14 @@ import {
   SHUTTER_INTERACT_RADIUS,
   SHUTTER_MAX_HP,
   SHUTTER_SPECS,
+  TACTICAL_FOCUS_KILL_BONUS,
+  TACTICAL_FOCUS_MAX,
+  updateCourtyardTerminal,
   updateDownedUnit,
+  updateEvacHoldCountdown,
   updateGeneratorCharge,
   updateShutterState,
+  updateTacticalFocus,
   worldToMinimap,
   type ShutterRuntimeState,
   type TargetCandidate,
@@ -611,6 +619,18 @@ export class MinatoEngine {
   private b1GeneratorActive = false;
   private b1GeneratorProgress = 0;
   private b1GeneratorInRange = false;
+  private courtyardSecured = false;
+  private courtyardProgress = 0;
+  private courtyardInRange = false;
+  private evacHoldRemaining = EVAC_HOLD_SEC;
+  private evacHolding = false;
+  private evacPressureTimer = 0;
+  private tacticalSlowMoRequested = false;
+  private tacticalSlowMoActive = false;
+  private tacticalFocus = TACTICAL_FOCUS_MAX;
+  private tacticalTimeScale = 1.0;
+  private leaderInLowCover = false;
+  private leaderOnHighGround = false;
   private stance: SquadStance = 'follow';
   private holdAnchor: { x: number; z: number } | null = null;
   private musicIntensity: MusicIntensity = 'ambient';
@@ -1106,7 +1126,7 @@ export class MinatoEngine {
 
   public startGame(
     fromUserGesture = true,
-    spawnZone?: 'shop' | 'courtyard' | 'b1' | 'arcade',
+    spawnZone?: 'shop' | 'courtyard' | 'b1' | 'arcade' | 'overlook',
   ): void {
     if (fromUserGesture) {
       this.audio.unlock();
@@ -1134,6 +1154,10 @@ export class MinatoEngine {
       this.camYaw = -0.18;
       this.camPitch = 0.66;
       this.camDist = 19.5;
+    } else if (spawnZone === 'overlook') {
+      this.camYaw = -0.14;
+      this.camPitch = 0.54;
+      this.camDist = 21.0;
     } else {
       this.camYaw = -0.18;
       this.camPitch = 0.62;
@@ -1177,7 +1201,7 @@ export class MinatoEngine {
     this.aimReticle.visible = true;
     this.syncBodyState();
     this.emitHud();
-    this.pushToast('ФАЗА 1: ЗАЧИСТИТЕ ПЕРЕКРЁСТОК А-3', '#4ce0e8');
+    this.pushToast('ЭТАП 1: ПРОРВИТЕСЬ В ПАРКИНГ B1 И ЗАПУСТИТЕ ГЕНЕРАТОР G', '#f5b971');
   }
 
   public cycleStance(): void {
@@ -1204,6 +1228,21 @@ export class MinatoEngine {
 
     this.audio.play('stanceOrder');
     this.pushToast(meta.toast, meta.color);
+    this.emitHud();
+  }
+
+  public toggleTacticalSlowMo(): void {
+    this.audio.unlock();
+    if (this.state !== 'playing' || this.inspectMode) return;
+    if (!this.tacticalSlowMoRequested && this.tacticalFocus < 0.35) {
+      this.pushToast('ТАКТИЧЕСКИЙ ФОКУС НА ПЕРЕЗАРЯДКЕ', '#ff5a72');
+      return;
+    }
+    this.tacticalSlowMoRequested = !this.tacticalSlowMoRequested;
+    this.audio.play('switchUnit');
+    if (this.tacticalSlowMoRequested) {
+      this.pushToast('ТАКТИЧЕСКОЕ ЗАМЕДЛЕНИЕ 0.22× [ПРОБЕЛ]', '#4ce0e8');
+    }
     this.emitHud();
   }
 
@@ -1796,7 +1835,7 @@ export class MinatoEngine {
     this.pickups = [];
   }
 
-  private setupRunEntities(spawnZone?: 'shop' | 'courtyard' | 'b1' | 'arcade'): void {
+  private setupRunEntities(spawnZone?: 'shop' | 'courtyard' | 'b1' | 'arcade' | 'overlook'): void {
     this.clearDynamicEntities();
     this.phase = 1;
     this.activeIdx = 0;
@@ -1807,6 +1846,18 @@ export class MinatoEngine {
     this.b1GeneratorActive = false;
     this.b1GeneratorProgress = 0;
     this.b1GeneratorInRange = false;
+    this.courtyardSecured = false;
+    this.courtyardProgress = 0;
+    this.courtyardInRange = false;
+    this.evacHoldRemaining = EVAC_HOLD_SEC;
+    this.evacHolding = false;
+    this.evacPressureTimer = 0;
+    this.tacticalSlowMoRequested = false;
+    this.tacticalSlowMoActive = false;
+    this.tacticalFocus = TACTICAL_FOCUS_MAX;
+    this.tacticalTimeScale = 1.0;
+    this.leaderInLowCover = false;
+    this.leaderOnHighGround = false;
     this.stance = 'follow';
     this.holdAnchor = null;
     this.holdBeacon.group.visible = false;
@@ -1858,28 +1909,48 @@ export class MinatoEngine {
     gen.progressArc.scale.setScalar(0.01);
     this.world.parkCyanLight.intensity = 2.4;
 
+    // Reset Courtyard Med-Data Terminal to locked standby until B1 power restores
+    const term = this.world.courtyardTerminal;
+    term.screenMat.color.setHex(0x3a4d5c);
+    term.screenMat.emissive.setHex(0x456070);
+    term.screenMat.emissiveIntensity = 0.35;
+    term.beaconMat.color.setHex(0x6c7c92);
+    term.beaconMat.emissive.setHex(0x4b5c72);
+    term.beaconMat.emissiveIntensity = 0.45;
+    term.beaconHalo.material.color.setHex(0x6ee782);
+    term.beaconHalo.material.opacity = 0.16;
+    term.scannerRing.visible = false;
+    term.captureRingMat.color.setHex(0x6c7c92);
+    term.captureRingMat.opacity = 0.25;
+    term.progressArc.visible = false;
+    term.progressArc.scale.setScalar(0.01);
+
     const sx =
       spawnZone === 'shop'
         ? -20.2
         : spawnZone === 'courtyard'
-          ? -12.6
+          ? -19.2
           : spawnZone === 'b1'
             ? 22.6
             : spawnZone === 'arcade'
               ? 8.8
-              : -15.5;
+              : spawnZone === 'overlook'
+                ? -1.0
+                : -15.5;
     const sz =
       spawnZone === 'shop'
         ? -3.4
         : spawnZone === 'courtyard'
-          ? -16.8
+          ? -17.4
           : spawnZone === 'b1'
             ? -1.2
             : spawnZone === 'arcade'
               ? -10.8
-              : 12.6;
+              : spawnZone === 'overlook'
+                ? 17.5
+                : 12.6;
     const spreadScale =
-      spawnZone === 'shop' || spawnZone === 'b1'
+      spawnZone === 'shop' || spawnZone === 'b1' || spawnZone === 'overlook'
         ? 0.55
         : spawnZone === 'courtyard' || spawnZone === 'arcade'
           ? 0.65
@@ -2608,6 +2679,7 @@ export class MinatoEngine {
       e.vis.hpBg.visible = false;
       e.vis.hpBar.visible = false;
       this.kills++;
+      this.tacticalFocus = Math.min(TACTICAL_FOCUS_MAX, this.tacticalFocus + TACTICAL_FOCUS_KILL_BONUS);
       this.spawnCombatDecal(
         e.x,
         e.z,
@@ -2634,11 +2706,13 @@ export class MinatoEngine {
 
       if (e.boss) {
         this.bossDefeated = true;
-        this.hitstopTimer = Math.max(this.hitstopTimer, 0.075);
-        this.addTrauma(0.9);
+        this.evacHoldRemaining = EVAC_HOLD_SEC;
+        this.evacPressureTimer = 2.6;
+        this.hitstopTimer = Math.max(this.hitstopTimer, 0.085);
+        this.addTrauma(0.95);
         this.audio.play('explosion');
         this.evacRing.visible = true;
-        this.pushToast('ТАНК ПОВЕРЖЕН! К ЗОНЕ ЭВАКУАЦИИ [F]!', '#4ce0e8');
+        this.pushToast('ТАНК ПОВЕРЖЕН! УДЕРЖИТЕ ЗОНУ ЭВАКУАЦИИ [F] 7 СЕК!', '#4ce0e8');
       }
       this.emitHud();
     }
@@ -2807,7 +2881,34 @@ export class MinatoEngine {
     const realDt = clampDelta((now - this.lastTime) / 1000);
     this.lastTime = now;
 
-    this.updateAmbientVisuals(realDt, now * 0.001);
+    let simDt = realDt;
+    if (this.state === 'playing' && !this.inspectMode) {
+      const focusStep = updateTacticalFocus(
+        this.tacticalFocus,
+        this.tacticalSlowMoRequested,
+        realDt,
+      );
+      const wasActive = this.tacticalSlowMoActive;
+      this.tacticalFocus = focusStep.focus;
+      this.tacticalSlowMoActive = focusStep.slowMoActive;
+      this.tacticalTimeScale = focusStep.timeScale;
+      if (!focusStep.slowMoActive) {
+        this.tacticalSlowMoRequested = false;
+      }
+      simDt = realDt * this.tacticalTimeScale;
+
+      if (wasActive !== this.tacticalSlowMoActive) {
+        this.syncTacticalGradeOverlay();
+        this.emitHud();
+      }
+    } else if (this.tacticalSlowMoActive) {
+      this.tacticalSlowMoActive = false;
+      this.tacticalSlowMoRequested = false;
+      this.tacticalTimeScale = 1.0;
+      this.syncTacticalGradeOverlay();
+    }
+
+    this.updateAmbientVisuals(simDt, now * 0.001);
 
     if (this.state === 'title') {
       this.updateTitleTour(realDt);
@@ -2817,7 +2918,7 @@ export class MinatoEngine {
         this.trauma = Math.max(0, this.trauma - realDt * 2.1);
         this.updateCamera(realDt, this.getActiveUnit());
       } else {
-        this.updateGameplay(realDt, now * 0.001);
+        this.updateGameplay(simDt, now * 0.001, realDt);
       }
     } else if (this.state === 'defeat' || this.state === 'victory') {
       this.updateParticles(realDt);
@@ -2826,6 +2927,28 @@ export class MinatoEngine {
 
     this.renderFrame();
     this.scheduleNextFrame();
+  }
+
+  private syncTacticalGradeOverlay(): void {
+    if (!this.gradePass) return;
+    const cfg = getMoodPostProcessConfig(this.mood);
+    if (this.tacticalSlowMoActive) {
+      this.gradePass.uniforms.uShadowTint.value.set(
+        cfg.shadowTint[0] * 0.86,
+        cfg.shadowTint[1] * 0.96,
+        Math.min(1.16, cfg.shadowTint[2] * 1.1),
+      );
+      this.gradePass.uniforms.uVignetteDarkness.value = Math.min(0.46, cfg.vignetteDarkness + 0.16);
+      this.gradePass.uniforms.uSaturation.value = cfg.saturation * 0.86;
+    } else {
+      this.gradePass.uniforms.uShadowTint.value.set(
+        cfg.shadowTint[0],
+        cfg.shadowTint[1],
+        cfg.shadowTint[2],
+      );
+      this.gradePass.uniforms.uVignetteDarkness.value = cfg.vignetteDarkness;
+      this.gradePass.uniforms.uSaturation.value = cfg.saturation;
+    }
   }
 
   private updateAmbientVisuals(dt: number, tSec: number): void {
@@ -2848,6 +2971,20 @@ export class MinatoEngine {
     gen.beaconHalo.material.opacity = genPulse;
     if (!this.b1GeneratorActive) {
       gen.captureRingMat.opacity = 0.48 + Math.sin(tSec * 4.2) * 0.24;
+    }
+
+    // Sakura Courtyard Med-Data Terminal holographic scanner ring & beacon
+    const term = this.world.courtyardTerminal;
+    const termUnlocked = this.b1GeneratorActive;
+    if (termUnlocked && !this.courtyardSecured) {
+      term.scannerRing.visible = true;
+      term.scannerRing.rotation.z += dt * (this.courtyardInRange ? 4.5 : 1.8);
+      term.beaconHalo.material.opacity = 0.55 + Math.sin(tSec * 5.0) * 0.24;
+      term.captureRingMat.opacity = 0.5 + Math.sin(tSec * 4.5) * 0.24;
+    } else if (this.courtyardSecured) {
+      term.scannerRing.visible = true;
+      term.scannerRing.rotation.z += dt * 0.9;
+      term.beaconHalo.material.opacity = 0.72;
     }
 
     // 1980s Neon Signage Ballast Hum & Micro-Flicker
@@ -2956,12 +3093,12 @@ export class MinatoEngine {
     this.camera.lookAt(targetX, targetY, targetZ);
   }
 
-  private updateGameplay(dt: number, tSec: number): void {
-    // Camera orbit via [ / ] keys (and right-mouse drag) — zero conflict with [Q] Stance & [E] Interact!
-    if (this.keysHeld.has('BracketLeft')) this.camYaw += 1.45 * dt;
-    if (this.keysHeld.has('BracketRight')) this.camYaw -= 1.45 * dt;
-    this.recoilKickX *= Math.exp(-16 * dt);
-    this.recoilKickZ *= Math.exp(-16 * dt);
+  private updateGameplay(dt: number, tSec: number, realDt = dt): void {
+    // Camera orbit via [ / ] keys (and right-mouse drag) — responsive even during Tactical Slow-Mo!
+    if (this.keysHeld.has('BracketLeft')) this.camYaw += 1.45 * realDt;
+    if (this.keysHeld.has('BracketRight')) this.camYaw -= 1.45 * realDt;
+    this.recoilKickX *= Math.exp(-16 * realDt);
+    this.recoilKickZ *= Math.exp(-16 * realDt);
 
     // Free Camera Inspect Mode [V]
     if (this.inspectMode) {
@@ -3239,12 +3376,20 @@ export class MinatoEngine {
         u.isMoving = moved > 0.012;
       }
 
-      // Acid pool hazard check
+      const unitTerrainY = getTerrainHeightAt(u.x, u.z);
+      const unitInLowCover = isUnitInLowCover(u.x, u.z, this.world.colliders);
+      const unitTacMods = computeTacticalCombatModifiers(unitTerrainY, unitInLowCover);
+      if (isActive) {
+        this.leaderInLowCover = unitTacMods.inLowCover;
+        this.leaderOnHighGround = unitTacMods.onHighGround;
+      }
+
+      // Acid pool hazard check (low cover reduces incoming acid tick damage)
       if (u.rollTimer <= 0) {
         for (let a = 0; a < this.acidPools.length; a++) {
           const pool = this.acidPools[a];
           if (Math.hypot(u.x - pool.x, u.z - pool.z) < pool.r) {
-            u.hp -= 16 * dt;
+            u.hp -= 16 * unitTacMods.rangedDamageTakenMult * dt;
             if (u.hp <= 0) {
               this.downSquadMember(u, `${u.name} РАНЕН КИСЛОТОЙ! ПОДОЙДИТЕ [E] ИЛИ МЕД-МАЯК [2]`);
             }
@@ -3309,8 +3454,11 @@ export class MinatoEngine {
           u.recoil = u.role === 'heavy' ? 0.26 : u.role === 'sniper' ? 0.24 : 0.14;
 
           const isOvercharged = u.overchargeTimer > 0;
-          const shotDmg = isOvercharged ? Math.round(u.dmg * ACTIVE_RELOAD_OVERCHARGE_MULT) : u.dmg;
-          const effSpread = computeWeaponSpread(u.spread, u.isMoving, !isActive && this.stance === 'hold');
+          const baseShotDmg = isOvercharged ? u.dmg * ACTIVE_RELOAD_OVERCHARGE_MULT : u.dmg;
+          const shotDmg = Math.round(baseShotDmg * unitTacMods.damageMult);
+          const effSpread =
+            computeWeaponSpread(u.spread, u.isMoving, (!isActive && this.stance === 'hold') || unitTacMods.inLowCover) *
+            unitTacMods.spreadMult;
           const spd = u.role === 'sniper' ? 54 : u.role === 'heavy' ? 38 : 42;
 
           for (let pIdx = 0; pIdx < u.pelletCount; pIdx++) {
@@ -3548,7 +3696,7 @@ export class MinatoEngine {
       this.focusTargetRing.visible = false;
     }
 
-    // Parking B1 Interactive Emergency Power Generator
+    // Stage 1 Objective: Parking B1 Interactive Emergency Power Generator
     const distGen = Math.hypot(leader.x - B1_GENERATOR.x, leader.z - B1_GENERATOR.z);
     this.b1GeneratorInRange = distGen <= B1_GENERATOR.r;
     const genStep = updateGeneratorCharge(
@@ -3565,6 +3713,26 @@ export class MinatoEngine {
     }
     if (genStep.activatedNow) {
       this.activateB1Generator();
+    }
+
+    // Stage 2 Objective: Sakura Courtyard Med-Data Terminal (unlocks once B1 Generator is online)
+    const distTerm = Math.hypot(leader.x - COURTYARD_TERMINAL.x, leader.z - COURTYARD_TERMINAL.z);
+    this.courtyardInRange = distTerm <= COURTYARD_TERMINAL.r;
+    const termStep = updateCourtyardTerminal(
+      this.courtyardProgress,
+      this.courtyardInRange,
+      dt,
+      this.b1GeneratorActive,
+      this.courtyardSecured,
+    );
+    this.courtyardProgress = termStep.progress;
+    const termVis = this.world.courtyardTerminal;
+    if (this.b1GeneratorActive && !this.courtyardSecured) {
+      termVis.progressArc.visible = this.courtyardProgress > 0.02;
+      termVis.progressArc.scale.setScalar(Math.max(0.05, this.courtyardProgress));
+    }
+    if (termStep.securedNow) {
+      this.secureCourtyardTerminal();
     }
 
     // Med Beacons
@@ -3657,7 +3825,9 @@ export class MinatoEngine {
         }
         for (const u of this.squad) {
           if (!u.down && u.rollTimer <= 0 && Math.hypot(u.x - b.x, u.z - b.z) < u.r + 0.42) {
-            u.hp = Math.max(0, u.hp - 14);
+            const inCov = isUnitInLowCover(u.x, u.z, this.world.colliders);
+            const acidDmg = Math.round(14 * (inCov ? 0.6 : 1.0));
+            u.hp = Math.max(0, u.hp - acidDmg);
             if (u.hp <= 0) {
               this.downSquadMember(u, `${u.name} РАНЕН! ПОДОЙДИТЕ [E] ИЛИ МЕД-МАЯК [2]`);
             } else {
@@ -4109,17 +4279,14 @@ export class MinatoEngine {
       p.sprite.material.opacity = alpha;
     }
 
-    // Phase progression
+    // 3-Stage Tactical District Mission Director
+    // Stage 1 -> Stage 2 happens when B1 Generator activates; Stage 2 -> Stage 3 when Courtyard Med-Data is secured.
     const livingEnemiesList = this.enemies.filter((e) => !e.dying);
     const livingEnemies = livingEnemiesList.length;
-    if (livingEnemies === 0 && this.enemies.length === 0) {
-      if (this.phase === 1) this.spawnWave(2);
-      else if (this.phase === 2) this.spawnWave(3);
-    }
 
     // Diegetic 3D Ground Waypoint Chevron & Adaptive 3-Stem Music Intensity Sync
     const boss = livingEnemiesList.find((e) => e.boss) ?? null;
-    const evacReady = this.bossDefeated && livingEnemies === 0;
+    const evacReady = this.bossDefeated;
     const nextMusicIntensity = computeMusicIntensity(
       this.state,
       this.phase,
@@ -4130,29 +4297,45 @@ export class MinatoEngine {
       this.musicIntensity = nextMusicIntensity;
       this.audio.setMusicIntensity(nextMusicIntensity);
     }
+
+    const activeObjectivePos = !this.b1GeneratorActive
+      ? { x: B1_GENERATOR.x, z: B1_GENERATOR.z }
+      : !this.courtyardSecured
+        ? { x: COURTYARD_TERMINAL.x, z: COURTYARD_TERMINAL.z }
+        : null;
+
     const wp = computePriorityWaypoint(
       leader.x,
       leader.z,
       boss ? { x: boss.x, z: boss.z } : null,
       livingEnemiesList,
       evacReady,
+      activeObjectivePos,
     );
     if (wp && !this.inspectMode) {
       const wdx = wp.x - leader.x;
       const wdz = wp.z - leader.z;
       const wDist = Math.hypot(wdx, wdz);
-      this.waypointChevron.group.visible = wDist > 2.2;
+      this.waypointChevron.group.visible = wDist > 2.4;
       this.waypointChevron.group.position.set(leader.x, getTerrainHeightAt(leader.x, leader.z), leader.z);
       this.waypointChevron.group.rotation.y = Math.atan2(wdx, wdz);
       this.waypointChevron.mat.color.setHex(
-        wp.kind === 'evac' ? 0x4ce0e8 : wp.kind === 'boss' ? 0xff3b52 : 0xf5b971,
+        wp.kind === 'evac'
+          ? 0x4ce0e8
+          : wp.kind === 'boss'
+            ? 0xff3b52
+            : wp.kind === 'objective'
+              ? this.b1GeneratorActive
+                ? 0x6ee782
+                : 0xf5b971
+              : 0xf5b971,
       );
       this.waypointChevron.mat.opacity = 0.72 + Math.sin(tSec * 6.0) * 0.2;
     } else {
       this.waypointChevron.group.visible = false;
     }
 
-    // Dynamic Overhead Occlusion Cutaway (cleanly hides roofs & 2nd-floor decks blocking Record Shop, Courtyard, Service Passage & Parking B1)
+    // Dynamic Overhead Occlusion Cutaway
     for (let i = 0; i < this.world.occludables.length; i++) {
       const occ = this.world.occludables[i];
       const zones = occ.extraZones ? [occ.zone, ...occ.extraZones] : [occ.zone];
@@ -4163,7 +4346,7 @@ export class MinatoEngine {
       const targetOp = inside && !this.inspectMode ? fadedOp : 1.0;
       let sampleOp = targetOp;
       for (const mat of occ.materials) {
-        mat.opacity += (targetOp - mat.opacity) * Math.min(1, dt * 12);
+        mat.opacity += (targetOp - mat.opacity) * Math.min(1, realDt * 12);
         sampleOp = mat.opacity;
       }
       if (occ.objects) {
@@ -4174,25 +4357,98 @@ export class MinatoEngine {
       }
     }
 
-    // Extraction check
+    // Stage 3 Evacuation 7-Second Hold Countdown (with tense final runner pressure!)
     if (evacReady) {
       this.evacRing.scale.setScalar(0.96 + Math.sin(tSec * 5) * 0.06);
-      if (canExtract(leader.x, leader.z, this.bossDefeated, livingEnemies)) {
+      const inEvac = Math.hypot(leader.x - EVAC_ZONE.x, leader.z - EVAC_ZONE.z) <= EVAC_ZONE.r;
+      this.evacHolding = inEvac;
+      const holdStep = updateEvacHoldCountdown(this.evacHoldRemaining, inEvac, dt, true);
+      this.evacHoldRemaining = holdStep.remainingSec;
+
+      this.evacPressureTimer -= dt;
+      if (this.evacPressureTimer <= 0 && livingEnemies < 4) {
+        this.evacPressureTimer = 3.2;
+        const fromArcade = Math.random() < 0.55;
+        this.spawnSingleEnemy('runner', fromArcade ? 11.4 : 21.0, fromArcade ? -6.5 : 8.5, true);
+      }
+
+      if (holdStep.extractedNow) {
         this.finishRun(true);
         return;
       }
+    } else {
+      this.evacHolding = false;
     }
 
-    this.updateCamera(dt, leader);
+    this.updateCamera(realDt, leader);
 
-    // Throttled HUD updates (faster while active reload or generator charge bar moves!)
+    // Throttled HUD updates (faster while active reload, objective capture, evac hold, or slow-mo runs!)
     const hudInterval =
-      leader.reloading || (this.b1GeneratorInRange && !this.b1GeneratorActive) ? 0.04 : 0.1;
-    this.hudPushAccum += dt;
+      leader.reloading ||
+      (this.b1GeneratorInRange && !this.b1GeneratorActive) ||
+      (this.courtyardInRange && this.b1GeneratorActive && !this.courtyardSecured) ||
+      this.tacticalSlowMoActive ||
+      this.evacHolding
+        ? 0.04
+        : 0.1;
+    this.hudPushAccum += realDt;
     if (this.hudPushAccum >= hudInterval) {
       this.hudPushAccum = 0;
       this.emitHud();
     }
+  }
+
+  private spawnSingleEnemy(type: 'walker' | 'runner' | 'armored' | 'spitter' | 'tank', x: number, z: number, awake: boolean): void {
+    const cfg = ENEMY_ARCHETYPES[type];
+    const vis = buildEnemyModel(
+      type,
+      cfg.hex,
+      cfg.accentHex,
+      cfg.armor,
+      cfg.ranged,
+      cfg.boss,
+      this.assets,
+      this.textures,
+    );
+    vis.group.position.set(x, getTerrainHeightAt(x, z), z);
+    this.scene.add(vis.group);
+    const glbInstance = this.mountSlotGlb(type, vis.proxyGroup, vis.customSlotMount, null);
+    this.enemies.push({
+      type,
+      policy: cfg.policy,
+      x,
+      z,
+      r: cfg.r,
+      hp: cfg.hp,
+      maxHp: cfg.hp,
+      speed: cfg.speed,
+      dmg: cfg.dmg,
+      armor: cfg.armor,
+      ranged: cfg.ranged,
+      boss: cfg.boss,
+      yaw: 0,
+      awake,
+      atkCd: 0,
+      specialCd: cfg.boss ? 2.4 : 1.8,
+      windupTimer: 0,
+      windupMax: cfg.boss ? 0.65 : 0.55,
+      windupTargetX: x,
+      windupTargetZ: z,
+      staggerTimer: 0,
+      knockVx: 0,
+      knockVz: 0,
+      steerDir: Math.random() < 0.5 ? 1 : -1,
+      steerTimer: 0,
+      flankPhase: Math.random() * Math.PI * 2,
+      hitFlash: 0,
+      stridePhase: 0,
+      dying: false,
+      koTimer: 0,
+      koVx: 0,
+      koVz: 0,
+      vis,
+      glbInstance,
+    });
   }
 
   private activateB1Generator(): void {
@@ -4257,7 +4513,60 @@ export class MinatoEngine {
       }
     });
 
-    this.pushToast('⚡ ГЕНЕРАТОР B1 АКТИВЕН: +15% ТЕМП ОГНЯ, БОЕЗАПАС +2 ШАШКИ!', '#4ce0e8');
+    // Unlock Stage 2 Courtyard Med-Data Terminal visuals
+    const term = this.world.courtyardTerminal;
+    term.screenMat.color.setHex(0x6ee782);
+    term.screenMat.emissive.setHex(0x6ee782);
+    term.screenMat.emissiveIntensity = 1.45;
+    term.beaconMat.color.setHex(0x6ee782);
+    term.beaconMat.emissive.setHex(0x6ee782);
+    term.beaconMat.emissiveIntensity = 1.9;
+    term.captureRingMat.color.setHex(0x6ee782);
+    term.captureRingMat.opacity = 0.72;
+    term.scannerRing.visible = true;
+
+    this.pushToast('ГЕНЕРАТОР B1 АКТИВЕН (+15% ТЕМП)! ЭТАП 2: ЗАБЕРИТЕ МЕД-ДАННЫЕ ВО ДВОРЕ САКУРЫ', '#4ce0e8');
+    if (this.phase === 1) {
+      this.spawnWave(2);
+    }
+    this.emitHud();
+  }
+
+  private secureCourtyardTerminal(): void {
+    this.courtyardSecured = true;
+    this.courtyardProgress = 1;
+    const term = this.world.courtyardTerminal;
+    term.screenMat.color.setHex(0x4ce0e8);
+    term.screenMat.emissive.setHex(0x4ce0e8);
+    term.screenMat.emissiveIntensity = 1.8;
+    term.beaconMat.color.setHex(0x4ce0e8);
+    term.beaconMat.emissive.setHex(0x4ce0e8);
+    term.beaconMat.emissiveIntensity = 2.0;
+    term.beaconHalo.material.color.setHex(0x4ce0e8);
+    term.captureRingMat.color.setHex(0x4ce0e8);
+    term.captureRingMat.opacity = 0.82;
+    term.progressArc.visible = true;
+    term.progressArc.scale.setScalar(1.0);
+
+    this.audio.play('generatorOnline');
+    this.addTrauma(0.5);
+    this.spawnBurst(COURTYARD_TERMINAL.x, 1.5, COURTYARD_TERMINAL.z, 0x6ee782, 22, 9.5, 0.5);
+
+    // Reward squad: +45 HP, full Tactical Focus, +1 Flare
+    this.tacticalFocus = TACTICAL_FOCUS_MAX;
+    this.flareAmmo = Math.min(MAX_FLARE_AMMO, this.flareAmmo + 1);
+    this.squad.forEach((m) => {
+      if (!m.down) {
+        m.hp = Math.min(m.maxHp, m.hp + 45);
+        m.magAmmo = m.magMax;
+        m.reloading = false;
+      }
+    });
+
+    this.pushToast('МЕД-ДАННЫЕ ПОЛУЧЕНЫ (+45 HP, ФОКУС 100%)! ЭТАП 3: ПРОРЫВ ТАНКА!', '#6ee782');
+    if (this.phase < 3) {
+      this.spawnWave(3);
+    }
     this.emitHud();
   }
 
@@ -4376,6 +4685,7 @@ export class MinatoEngine {
 
     const leaderUv = leader ? worldToMinimap(leader.x, leader.z) : { u: 0.24, v: 0.84 };
     const genUv = worldToMinimap(B1_GENERATOR.x, B1_GENERATOR.z);
+    const termUv = worldToMinimap(COURTYARD_TERMINAL.x, COURTYARD_TERMINAL.z);
     const evacUv = worldToMinimap(EVAC_ZONE.x, EVAC_ZONE.z);
     const holdUv = this.holdAnchor ? worldToMinimap(this.holdAnchor.x, this.holdAnchor.z) : null;
 
@@ -4464,7 +4774,12 @@ export class MinatoEngine {
       phase: this.phase,
       totalPhases: 3,
       zoneName: leader ? getZoneName(leader.x, leader.z) : 'ПЕРЕКРЁСТОК А-3 // «Café / 喫茶»',
-      objective: getPhaseObjective(this.phase, this.bossDefeated, this.b1GeneratorActive),
+      objective: getPhaseObjective(
+        this.phase,
+        this.bossDefeated,
+        this.b1GeneratorActive,
+        this.courtyardSecured,
+      ),
       enemiesAlive: livingEnemies,
       kills: this.kills,
       flares: this.flareAmmo,
@@ -4477,7 +4792,7 @@ export class MinatoEngine {
       muted: this.audio.isMuted(),
       musicOn: this.audio.isMusicEnabled(),
       rallyActive: this.rallyBuffTimer > 0,
-      evacActive: this.bossDefeated && livingEnemies === 0,
+      evacActive: this.bossDefeated,
       bossActive: Boolean(boss),
       bossHpPercent: boss ? Math.max(0, Math.round((boss.hp / boss.maxHp) * 100)) : 0,
       lowHpWarning,
@@ -4515,6 +4830,26 @@ export class MinatoEngine {
         progress: this.b1GeneratorProgress,
         inRange: this.b1GeneratorInRange,
       },
+      courtyardTerminal: {
+        unlocked: this.b1GeneratorActive,
+        secured: this.courtyardSecured,
+        charging: this.b1GeneratorActive && !this.courtyardSecured && this.courtyardInRange,
+        progress: this.courtyardProgress,
+        inRange: this.courtyardInRange,
+      },
+      tactical: {
+        slowMoActive: this.tacticalSlowMoActive,
+        focus: this.tacticalFocus,
+        maxFocus: TACTICAL_FOCUS_MAX,
+        inLowCover: this.leaderInLowCover,
+        onHighGround: this.leaderOnHighGround,
+      },
+      evacHold: {
+        active: this.bossDefeated,
+        holding: this.evacHolding,
+        remainingSec: this.evacHoldRemaining,
+        totalSec: EVAC_HOLD_SEC,
+      },
       minimap: {
         leaderU: leaderUv.u,
         leaderV: leaderUv.v,
@@ -4548,9 +4883,13 @@ export class MinatoEngine {
         generatorU: genUv.u,
         generatorV: genUv.v,
         generatorActive: this.b1GeneratorActive,
+        terminalU: termUv.u,
+        terminalV: termUv.v,
+        terminalUnlocked: this.b1GeneratorActive,
+        terminalSecured: this.courtyardSecured,
         evacU: evacUv.u,
         evacV: evacUv.v,
-        evacActive: this.bossDefeated && livingEnemies === 0,
+        evacActive: this.bossDefeated,
       },
       units: this.squad.map((u, idx) => ({
         id: u.id,
@@ -4643,11 +4982,16 @@ export class MinatoEngine {
       else if (e.code === 'KeyQ') this.cycleStance();
       else if (e.code === 'KeyE') this.triggerInteract();
       else if (e.code === 'KeyF') this.throwFlare();
-      else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'Space') {
+      else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
         if (!this.inspectMode) {
           e.preventDefault();
           this.rollBufferTimer = 0.14;
           this.performRoll();
+        }
+      } else if (e.code === 'Space') {
+        if (!this.inspectMode) {
+          e.preventDefault();
+          this.toggleTacticalSlowMo();
         }
       } else if (e.code === 'Tab') {
         e.preventDefault();

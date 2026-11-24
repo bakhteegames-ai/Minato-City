@@ -136,7 +136,7 @@ export function TitleOverlay({ mood, onStart, onCycleMood, onOpenAssetLab }: Tit
 
       {/* High-contrast control-hint strip in bottom safe margin */}
       <div className="inline-block self-start bg-[#090d16]/90 border border-white/15 px-3.5 py-1.5 text-xs sm:text-[13px] tracking-wide text-[#e2e8f8] hud-text-stroke">
-        WASD Бег · Shift Перекат · ЛКМ Огонь · ПКМ Камера · R Перезарядка · Q Приказ · E Действие · F Шашка · Tab Боец · 1–4 Навыки
+        WASD Бег · Shift Перекат · Пробел Тактика 0.22× · ЛКМ Огонь · ПКМ Камера · R Перезарядка · Q Приказ · E Действие · F Шашка · Tab Боец
       </div>
     </div>
   );

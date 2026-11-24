@@ -50,6 +50,26 @@ const INITIAL_HUD: HudSnapshot = {
     progress: 0,
     inRange: false,
   },
+  courtyardTerminal: {
+    unlocked: false,
+    secured: false,
+    charging: false,
+    progress: 0,
+    inRange: false,
+  },
+  tactical: {
+    slowMoActive: false,
+    focus: 5,
+    maxFocus: 5,
+    inLowCover: false,
+    onHighGround: false,
+  },
+  evacHold: {
+    active: false,
+    holding: false,
+    remainingSec: 7,
+    totalSec: 7,
+  },
   minimap: {
     leaderU: 0.24,
     leaderV: 0.84,
@@ -62,6 +82,10 @@ const INITIAL_HUD: HudSnapshot = {
     generatorU: 0.9,
     generatorV: 0.54,
     generatorActive: false,
+    terminalU: 0.14,
+    terminalV: 0.17,
+    terminalUnlocked: false,
+    terminalSecured: false,
     evacU: 0.47,
     evacV: 0.86,
     evacActive: false,
@@ -141,7 +165,11 @@ function MinatoGameView({ onOpenAssetLab }: { onOpenAssetLab: () => void }) {
     if (params.get('autostart') === '1') {
       const rawZone = params.get('zone');
       const spawnZone =
-        rawZone === 'shop' || rawZone === 'courtyard' || rawZone === 'b1' || rawZone === 'arcade'
+        rawZone === 'shop' ||
+        rawZone === 'courtyard' ||
+        rawZone === 'b1' ||
+        rawZone === 'arcade' ||
+        rawZone === 'overlook'
           ? rawZone
           : undefined;
       engine.startGame(false, spawnZone);
@@ -181,6 +209,7 @@ function MinatoGameView({ onOpenAssetLab }: { onOpenAssetLab: () => void }) {
           onTriggerSkill={(idx) => engineRef.current?.triggerSkill(idx)}
           onTriggerReload={() => engineRef.current?.triggerReload()}
           onCycleStance={() => engineRef.current?.cycleStance()}
+          onToggleSlowMo={() => engineRef.current?.toggleTacticalSlowMo()}
           onThrowFlare={() => engineRef.current?.throwFlare()}
           onToggleInspect={() => engineRef.current?.toggleInspectMode()}
           onCycleMood={() => engineRef.current?.cycleMood()}
