@@ -1,0 +1,18 @@
+{
+  "_readme": "Drop rigged or static .glb/.gltf files into /public/models/ and set their paths below (e.g. \"/models/leader.glb\"). Slots set to null use the built-in procedural greybox proxies. You can also hot-swap any slot live from the Pause menu (Esc -> 3D АССЕТЫ / ЭКСПОРТ).",
+  "slots": {
+    "leader": null,
+    "medic": null,
+    "heavy": null,
+    "sniper": null,
+    "walker": null,
+    "runner": null,
+    "armored": null,
+    "spitter": null,
+    "tank": null,
+    "taxi": null,
+    "sedan": null,
+    "coupe": null,
+    "van": null
+  }
+}

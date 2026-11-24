@@ -1,0 +1,6 @@
+{
+  "name": "港都 MINATO CITY — Перекрёсток А-3",
+  "description": "3D тактический экшен в стиле японского 1980s City Pop на Three.js с процедурным звуковым движком.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
