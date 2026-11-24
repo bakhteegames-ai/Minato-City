@@ -16,6 +16,8 @@ interface GameHudProps {
   onToggleMusic: () => void;
   onToggleMute: () => void;
   onTogglePause: () => void;
+  onInteract: () => void;
+  onReviveHoldChange: (held: boolean) => void;
 }
 
 function RoleIcon({ role, color }: { role: SquadRole; color: string }) {
@@ -71,6 +73,8 @@ export function GameHud({
   onToggleMusic,
   onToggleMute,
   onTogglePause,
+  onInteract,
+  onReviveHoldChange,
 }: GameHudProps) {
   const [dockCollapsed, setDockCollapsed] = useState(false);
   const ar = hud.activeReload;
@@ -91,15 +95,10 @@ export function GameHud({
       {/* TOP BAR: Compact perimeter corners, center kept clear */}
       <div className="flex items-start justify-between gap-3">
         {/* Top-left: Zone & Objective Plaque */}
-        <div className="bg-[#0d1122]/90 border-l-4 border-l-[#f45b8a] border border-[#2c365c] px-3.5 py-2.5 max-w-[360px] shadow-[3px_3px_0_rgba(7,9,18,0.85)]">
+        <div className="bg-[#0d1122]/92 border border-[#2c365c] px-3.5 py-2.5 max-w-[360px] shadow-[3px_3px_0_rgba(7,9,18,0.85)]">
           <div className="flex items-center gap-2">
-            <svg viewBox="0 0 24 24" className="w-4 h-4 shrink-0" aria-hidden="true">
-              <circle cx="12" cy="12" r="10" fill="#e84b72" />
-              <rect x="2" y="13" width="20" height="2" fill="#0d1122" />
-              <rect x="2" y="17" width="20" height="2.2" fill="#0d1122" />
-            </svg>
             <span className="font-display text-xs font-bold tracking-[0.12em] text-[#4ce0e8] uppercase truncate">
-              {hud.zoneName}
+              {hud.zoneName.replace(/\s*\/\/\s*/g, ' · ')}
             </span>
           </div>
           <p className="mt-1 text-xs leading-snug text-[#f4d8a2]">{hud.objective}</p>
@@ -148,7 +147,7 @@ export function GameHud({
                 type="button"
                 tabIndex={-1}
                 aria-label="Сменить освещение сцены"
-                title="Освещение: Ночь / Закат / Туман [T]"
+                title="Освещение: Ночь / День / Закат / Туман [T]"
                 onClick={(e) => {
                   e.currentTarget.blur();
                   onCycleMood();
@@ -235,7 +234,7 @@ export function GameHud({
       {hud.bossActive && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 w-[min(420px,46vw)] bg-[#110c1a]/95 border border-[#ff3b52] px-3.5 py-2 shadow-[0_0_24px_rgba(255,59,82,0.35)]">
           <div className="flex items-center justify-between font-display text-xs font-bold tracking-[0.1em] text-[#ff6b7a] mb-1">
-            <span>⚠ ТАНК — МИНИ-БОСС</span>
+            <span>ТАНК — МИНИ-БОСС</span>
             <span className="tabular-nums">{hud.bossHpPercent}%</span>
           </div>
           <div className="h-2.5 bg-[#291320] overflow-hidden">
@@ -302,7 +301,7 @@ export function GameHud({
         {!hud.generator.active && (hud.generator.inRange || hud.generator.progress > 0.02) && !hud.inspectMode && (
           <div className="mb-2 w-[260px] bg-[#0d1122]/95 border border-[#f5b971] px-3 py-1.5 shadow-[3px_3px_0_rgba(7,9,18,0.9)]">
             <div className="flex items-center justify-between font-display text-[10px] font-bold tracking-[0.12em] uppercase mb-1">
-              <span className="text-[#f5b971]">⚡ ЗАПУСК ГЕНЕРАТОРА B1</span>
+              <span className="text-[#f5b971]">ЗАПУСК ГЕНЕРАТОРА B1</span>
               <span className="text-[#4ce0e8] tabular-nums">{Math.round(hud.generator.progress * 100)}%</span>
             </div>
             <div className="h-2 bg-[#1b2238] border border-[#2f3b64] overflow-hidden">
@@ -312,6 +311,52 @@ export function GameHud({
               />
             </div>
           </div>
+        )}
+
+        {/* Contextual [E] World Interact Prompt (Security Shutters & Downed Ally Revive) */}
+        {hud.interactPrompt && !hud.inspectMode && (
+          <button
+            type="button"
+            tabIndex={-1}
+            data-interact-prompt="true"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              onInteract();
+            }}
+            onPointerDown={() => {
+              if (hud.interactPrompt?.kind === 'revive') onReviveHoldChange(true);
+            }}
+            onPointerUp={() => onReviveHoldChange(false)}
+            onPointerLeave={() => onReviveHoldChange(false)}
+            className="pointer-events-auto mb-2 min-w-[260px] max-w-[340px] bg-[#0d1122]/95 border px-3 py-1.5 shadow-[3px_3px_0_rgba(7,9,18,0.92)] cursor-pointer text-left"
+            style={{ borderColor: hud.interactPrompt.accent }}
+          >
+            <div className="flex items-center justify-between gap-2 font-display text-[11px] font-bold tracking-[0.1em] uppercase">
+              <span className="text-white">{hud.interactPrompt.label}</span>
+              <span
+                className="px-1.5 py-0.5 text-[10px] text-[#090b16] font-extrabold shrink-0"
+                style={{ backgroundColor: hud.interactPrompt.accent }}
+              >
+                [{hud.interactPrompt.key}]
+              </span>
+            </div>
+            {hud.interactPrompt.sublabel && (
+              <div className="mt-0.5 text-[10px] text-[#b9c8e8] tracking-wide">
+                {hud.interactPrompt.sublabel}
+              </div>
+            )}
+            {typeof hud.interactPrompt.progress === 'number' && hud.interactPrompt.progress > 0 && (
+              <div className="mt-1 h-1.5 bg-[#1b2238] border border-[#2f3b64] overflow-hidden">
+                <div
+                  className="h-full transition-[width] duration-75"
+                  style={{
+                    width: `${Math.min(100, Math.round(hud.interactPrompt.progress * 100))}%`,
+                    backgroundColor: hud.interactPrompt.accent,
+                  }}
+                />
+              </div>
+            )}
+          </button>
         )}
 
         {!ar.reloading && ar.overchargeLeft > 0 && !hud.inspectMode && (
@@ -407,26 +452,47 @@ export function GameHud({
                     </span>
                   </div>
 
-                  {/* Magazine Ammo Readout */}
-                  <div className="flex items-center justify-between text-[9px] leading-none font-display tracking-wider">
-                    <span className={u.overcharged ? 'text-[#f5b971] font-bold' : 'text-[#8ea0c7]'}>
-                      {u.reloading ? 'ПЕРЕЗАРЯДКА' : u.overcharged ? 'УСИЛЕН +35%' : 'ПАТРОНЫ [R]'}
-                    </span>
-                    <span
-                      className="font-bold tabular-nums"
-                      style={{
-                        color: u.reloading
-                          ? '#4ce0e8'
-                          : u.magAmmo <= Math.ceil(u.magMax * 0.25)
-                            ? '#ff5a72'
-                            : u.overcharged
-                              ? '#f5b971'
-                              : '#e2ebff',
-                      }}
-                    >
-                      {u.magAmmo}/{u.magMax}
-                    </span>
-                  </div>
+                  {/* Magazine + Reserve Ammo or Downed Bleedout Bar */}
+                  {u.down ? (
+                    <div className="mt-0.5">
+                      <div className="flex items-center justify-between text-[9px] leading-none font-display tracking-wider mb-1">
+                        <span className="text-[#ff5a72] font-bold">
+                          {u.bleedoutTimer > 0 ? 'ИСТЕКАЕТ · [E] ПОДНЯТЬ' : 'ПОТЕРЯН В БОЮ'}
+                        </span>
+                        <span className="font-bold tabular-nums text-[#ffd2d9]">
+                          {u.bleedoutTimer > 0 ? `${Math.ceil(u.bleedoutTimer)}с` : '0с'}
+                        </span>
+                      </div>
+                      <div className="h-1 bg-[#2b1019] overflow-hidden">
+                        <div
+                          className="h-full bg-[#ff3b52]"
+                          style={{
+                            width: `${u.bleedoutMax > 0 ? Math.max(0, Math.min(100, (u.bleedoutTimer / u.bleedoutMax) * 100)) : 0}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between text-[9px] leading-none font-display tracking-wider">
+                      <span className={u.overcharged ? 'text-[#f5b971] font-bold truncate pr-1' : 'text-[#8ea0c7] truncate pr-1'}>
+                        {u.reloading ? 'ПЕРЕЗАРЯДКА' : u.overcharged ? 'УСИЛЕН +35%' : u.weaponRoleLabel}
+                      </span>
+                      <span
+                        className="font-bold tabular-nums shrink-0"
+                        style={{
+                          color: u.reloading
+                            ? '#4ce0e8'
+                            : u.magAmmo <= Math.ceil(u.magMax * 0.25)
+                              ? '#ff5a72'
+                              : u.overcharged
+                                ? '#f5b971'
+                                : '#e2ebff',
+                        }}
+                      >
+                        {u.magAmmo}/{u.reserveAmmo}
+                      </span>
+                    </div>
+                  )}
 
                   {/* Skill cooldown progress line */}
                   <div

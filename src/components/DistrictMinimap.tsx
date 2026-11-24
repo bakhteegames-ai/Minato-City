@@ -151,15 +151,43 @@ export function DistrictMinimap({ minimap }: DistrictMinimapProps) {
               />
               <text
                 x="0"
-                y="2.8"
+                y="2.6"
                 textAnchor="middle"
                 fill={minimap.generatorActive ? '#4ce0e8' : '#f5b971'}
-                fontSize="7.5"
+                fontSize="7"
                 fontWeight="900"
+                fontFamily="Chakra Petch, sans-serif"
               >
-                ⚡
+                G
               </text>
             </g>
+
+            {/* Elevated South Tactical Overlook Deck (+1.5m High Ground) */}
+            <rect x="65" y="106" width="38" height="10" fill="#232c48" stroke="#f5b971" strokeOpacity="0.65" strokeWidth="0.9" />
+            <text x="68" y="113" fill="#f5b971" fontSize="5.2" fontWeight="700" fontFamily="Chakra Petch, sans-serif">
+              ЭСТАКАДА +1.5м
+            </text>
+
+            {/* Interactive Security Shutters (Рольставни — [E]) */}
+            {minimap.shutters.map((sh) => {
+              const cx = px(sh.u);
+              const cy = py(sh.v);
+              const col =
+                sh.status === 'sealed' ? '#f5b971' : sh.status === 'cooldown' ? '#ff5a72' : '#4ce0e8';
+              return (
+                <g key={sh.id} transform={`translate(${cx}, ${cy})`}>
+                  <rect
+                    x={sh.id === 'arcade' ? -7 : -2.2}
+                    y={sh.id === 'arcade' ? -2.2 : -6}
+                    width={sh.id === 'arcade' ? 14 : 4.4}
+                    height={sh.id === 'arcade' ? 4.4 : 12}
+                    fill={sh.status === 'sealed' ? col : '#0b0f20'}
+                    stroke={col}
+                    strokeWidth="1.2"
+                  />
+                </g>
+              );
+            })}
 
             {/* Tactical Hold Position Beacon */}
             {minimap.holdPoint && (
@@ -222,7 +250,7 @@ export function DistrictMinimap({ minimap }: DistrictMinimapProps) {
           {/* Compact legend */}
           <div className="mt-1 flex items-center justify-between text-[8px] font-display tracking-wider text-[#9db0d9] uppercase">
             <span className={minimap.generatorActive ? 'text-[#4ce0e8] font-bold' : 'text-[#f5b971]'}>
-              ⚡ B1: {minimap.generatorActive ? 'АКТИВЕН' : 'ОФФЛАЙН'}
+              B1: {minimap.generatorActive ? 'АКТИВЕН' : 'ОФФЛАЙН'}
             </span>
             <span>◆ ЛУТ · ● ВРАГИ</span>
           </div>

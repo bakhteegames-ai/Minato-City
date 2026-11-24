@@ -1,0 +1,263 @@
+{
+  "schema_version": "stage-gate-v2",
+  "style_passport": "docs/GOLDEN_STYLE_PASSPORT.md",
+  "generated_at": "2026-11-24T17:09:13.873Z",
+  "note": "All assets passed automated strict geometry/UV/ground inspection and remain status=candidate until explicit owner visual approval.",
+  "assets": [
+    {
+      "id": "vehicle_sedan_1980s",
+      "category": "vehicle",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 8108,
+      "mesh_count": 20,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        4.893,
+        1.463,
+        2.07
+      ],
+      "min_y_m": -0.0009
+    },
+    {
+      "id": "vehicle_delivery_van",
+      "category": "vehicle",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 1572,
+      "mesh_count": 19,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        5.11,
+        2.22,
+        2.52
+      ],
+      "min_y_m": 0
+    },
+    {
+      "id": "arch_modular_urban_2f",
+      "category": "architecture",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 9896,
+      "mesh_count": 6,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        12.74,
+        8.03,
+        12.47
+      ],
+      "min_y_m": -0.01
+    },
+    {
+      "id": "arch_ribbed_awning",
+      "category": "architecture",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 2048,
+      "mesh_count": 3,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        9.988,
+        1.178,
+        2.385
+      ],
+      "min_y_m": -0.7314
+    },
+    {
+      "id": "prop_cobra_streetlamp",
+      "category": "prop",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 752,
+      "mesh_count": 6,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        3.08,
+        9,
+        0.52
+      ],
+      "min_y_m": 0
+    },
+    {
+      "id": "prop_vending_machine",
+      "category": "prop",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 6276,
+      "mesh_count": 17,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        1.22,
+        1.995,
+        0.865
+      ],
+      "min_y_m": 0
+    },
+    {
+      "id": "char_squad_leader",
+      "category": "character",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 2752,
+      "mesh_count": 21,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        0.637,
+        1.875,
+        1.422
+      ],
+      "min_y_m": 0
+    },
+    {
+      "id": "char_squad_medic",
+      "category": "character",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 2688,
+      "mesh_count": 21,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        0.637,
+        1.84,
+        1.274
+      ],
+      "min_y_m": 0
+    },
+    {
+      "id": "char_squad_heavy",
+      "category": "character",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 2688,
+      "mesh_count": 20,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        0.821,
+        1.992,
+        1.707
+      ],
+      "min_y_m": 0
+    },
+    {
+      "id": "char_squad_sniper",
+      "category": "character",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 2856,
+      "mesh_count": 20,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        0.57,
+        1.845,
+        1.937
+      ],
+      "min_y_m": 0
+    },
+    {
+      "id": "enemy_infected_walker",
+      "category": "character",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 1772,
+      "mesh_count": 15,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        0.683,
+        1.673,
+        1.008
+      ],
+      "min_y_m": 0
+    },
+    {
+      "id": "enemy_infected_runner",
+      "category": "character",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 1772,
+      "mesh_count": 15,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        0.642,
+        1.573,
+        1.017
+      ],
+      "min_y_m": 0
+    },
+    {
+      "id": "enemy_infected_armored",
+      "category": "character",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 1960,
+      "mesh_count": 17,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        0.883,
+        1.955,
+        1.158
+      ],
+      "min_y_m": 0
+    },
+    {
+      "id": "enemy_infected_spitter",
+      "category": "character",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 1964,
+      "mesh_count": 16,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        0.683,
+        1.673,
+        1.08
+      ],
+      "min_y_m": 0
+    },
+    {
+      "id": "enemy_infected_tank",
+      "category": "character",
+      "status": "candidate",
+      "approved_by_owner": false,
+      "strict_audit_passed": true,
+      "triangles": 2028,
+      "mesh_count": 17,
+      "degenerate_triangles": 0,
+      "nan_vertices": 0,
+      "bounds_m": [
+        1.535,
+        2.931,
+        2.764
+      ],
+      "min_y_m": 0
+    }
+  ]
+}

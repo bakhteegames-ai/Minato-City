@@ -398,41 +398,56 @@ export interface MoodPostProcessConfig {
   contrast: number;
 }
 
-export function getMoodPostProcessConfig(mood: 'night' | 'sunset' | 'mist'): MoodPostProcessConfig {
+export function getMoodPostProcessConfig(
+  mood: 'night' | 'day' | 'sunset' | 'mist',
+): MoodPostProcessConfig {
+  if (mood === 'day') {
+    // Neutral daylight inspection preset (zero bloom hiding geometry, neutral color fidelity)
+    return {
+      bloomStrength: 0.0,
+      bloomRadius: 0.2,
+      bloomThreshold: 2.0,
+      shadowTint: [0.99, 1.0, 1.02],
+      highlightTint: [1.01, 1.0, 0.98],
+      vignetteDarkness: 0.1,
+      saturation: 1.02,
+      contrast: 1.02,
+    };
+  }
   if (mood === 'sunset') {
     return {
-      bloomStrength: 0.24,
-      bloomRadius: 0.34,
-      bloomThreshold: 1.32,
-      shadowTint: [0.92, 0.86, 1.08],
-      highlightTint: [1.08, 0.94, 0.86],
-      vignetteDarkness: 0.28,
-      saturation: 1.14,
-      contrast: 1.05,
+      bloomStrength: 0.16,
+      bloomRadius: 0.28,
+      bloomThreshold: 1.42,
+      shadowTint: [0.95, 0.9, 1.04],
+      highlightTint: [1.06, 0.95, 0.88],
+      vignetteDarkness: 0.22,
+      saturation: 1.1,
+      contrast: 1.04,
     };
   }
   if (mood === 'mist') {
     return {
-      bloomStrength: 0.24,
-      bloomRadius: 0.38,
-      bloomThreshold: 1.3,
-      shadowTint: [0.84, 0.96, 1.08],
-      highlightTint: [0.94, 1.02, 1.06],
-      vignetteDarkness: 0.3,
-      saturation: 1.08,
-      contrast: 1.04,
+      bloomStrength: 0.16,
+      bloomRadius: 0.3,
+      bloomThreshold: 1.4,
+      shadowTint: [0.9, 0.97, 1.04],
+      highlightTint: [0.97, 1.01, 1.03],
+      vignetteDarkness: 0.22,
+      saturation: 1.04,
+      contrast: 1.03,
     };
   }
-  // 'night' — Crisp 1980s City Pop 70/20/10: luminous indigo shadows, selective neon-only HDR bloom
+  // 'night' — Restrained Noir Night (no monochrome blue wash, no bloom smear, clear local colors)
   return {
-    bloomStrength: 0.23,
-    bloomRadius: 0.32,
-    bloomThreshold: 1.36,
-    shadowTint: [0.88, 0.92, 1.12],
-    highlightTint: [1.05, 0.97, 0.92],
-    vignetteDarkness: 0.28,
-    saturation: 1.14,
-    contrast: 1.05,
+    bloomStrength: 0.14,
+    bloomRadius: 0.26,
+    bloomThreshold: 1.48,
+    shadowTint: [0.94, 0.96, 1.04],
+    highlightTint: [1.04, 0.99, 0.93],
+    vignetteDarkness: 0.2,
+    saturation: 1.08,
+    contrast: 1.04,
   };
 }
 
@@ -492,7 +507,7 @@ export function worldToMinimap(x: number, z: number): { u: number; v: number } {
 
 export const AMMO_CRATE_SPAWNS: ReadonlyArray<{ x: number; z: number; zoneLabel: string }> = [
   { x: 8.6, z: -12.6, zoneLabel: 'ГАЛЕРЕЯ / СЕРВИС' },
-  { x: 19.4, z: 8.8, zoneLabel: 'ПАРКИНГ B1' },
+  { x: 22.8, z: 8.4, zoneLabel: 'ПАРКИНГ B1' },
 ];
 
 export const AMMO_CRATE_COOLDOWN_SEC = 25;
@@ -792,6 +807,302 @@ export function buildLevelBlueprintExport(colliders: readonly ColliderBox[]): Le
     assetSlots: ASSET_SLOT_SPECS,
   };
 }
+
+// =========================================================================
+// TACTICAL OVERHAUL: ELEVATION, SECURITY SHUTTERS, FLANK ARMOR, AMMO & REVIVE
+// =========================================================================
+
+export const OVERLOOK_DECK = {
+  deckX1: -6.2,
+  deckX2: 4.6,
+  westRampX1: -9.6,
+  eastRampX2: 8.0,
+  z1: 16.0,
+  z2: 19.0,
+  height: 1.5,
+} as const;
+
+export const B1_PIT = {
+  rampX1: 17.5,
+  rampX2: 21.2,
+  floorX2: 31.6,
+  z1: -8.2,
+  z2: 13.6,
+  depth: -1.25,
+} as const;
+
+/**
+ * Deterministic multi-level terrain height function shared across all entities,
+ * projectiles, decals, camera, and world geometry:
+ * - Elevated South Tactical Overlook Deck (+1.50m) with twin west/east ramps
+ * - Sunken Parking B1 Pit (-1.25m) reached via sloped concrete ramp from east street
+ * - Raised urban sidewalks (+0.16m)
+ * - Main wet asphalt street (0.0m)
+ */
+export function getTerrainHeightAt(x: number, z: number): number {
+  // 1. Elevated South Overlook Deck & twin access ramps
+  if (z >= OVERLOOK_DECK.z1 && z <= OVERLOOK_DECK.z2) {
+    if (x >= OVERLOOK_DECK.deckX1 && x <= OVERLOOK_DECK.deckX2) {
+      return OVERLOOK_DECK.height;
+    }
+    if (x >= OVERLOOK_DECK.westRampX1 && x < OVERLOOK_DECK.deckX1) {
+      const t = (x - OVERLOOK_DECK.westRampX1) / (OVERLOOK_DECK.deckX1 - OVERLOOK_DECK.westRampX1);
+      return OVERLOOK_DECK.height * Math.max(0, Math.min(1, t));
+    }
+    if (x > OVERLOOK_DECK.deckX2 && x <= OVERLOOK_DECK.eastRampX2) {
+      const t = 1 - (x - OVERLOOK_DECK.deckX2) / (OVERLOOK_DECK.eastRampX2 - OVERLOOK_DECK.deckX2);
+      return OVERLOOK_DECK.height * Math.max(0, Math.min(1, t));
+    }
+  }
+
+  // 2. Sunken Parking B1 Garage Floor & Sloped Entry Ramp
+  if (z >= B1_PIT.z1 && z <= B1_PIT.z2) {
+    if (x >= B1_PIT.rampX2 && x <= B1_PIT.floorX2) {
+      return B1_PIT.depth;
+    }
+    if (x >= B1_PIT.rampX1 && x < B1_PIT.rampX2) {
+      const t = (x - B1_PIT.rampX1) / (B1_PIT.rampX2 - B1_PIT.rampX1);
+      return B1_PIT.depth * Math.max(0, Math.min(1, t));
+    }
+  }
+
+  // 3. Raised Japanese urban sidewalks along storefronts & arcade curb
+  if (x >= -28.0 && x <= 6.2 && z >= 1.8 && z <= 3.6) {
+    return 0.16;
+  }
+
+  return 0;
+}
+
+export interface SecurityShutterSpec {
+  id: 'arcade' | 'service';
+  label: string;
+  x: number;
+  z: number;
+  width: number;
+  axis: 'x' | 'z';
+  panelX: number;
+  panelZ: number;
+  collider: ColliderBox;
+}
+
+export const SHUTTER_DURATION_SEC = 10.0;
+export const SHUTTER_COOLDOWN_SEC = 18.0;
+export const SHUTTER_MAX_HP = 180;
+export const SHUTTER_INTERACT_RADIUS = 3.4;
+
+export const SHUTTER_SPECS: readonly SecurityShutterSpec[] = [
+  {
+    id: 'arcade',
+    label: 'РОЛЬСТАВНЯ ГАЛЕРЕИ',
+    x: 11.4,
+    z: 1.0,
+    width: 5.6,
+    axis: 'x',
+    panelX: 8.1,
+    panelZ: 2.35,
+    collider: { x1: 8.5, z1: 0.55, x2: 14.3, z2: 1.45, tall: true },
+  },
+  {
+    id: 'service',
+    label: 'РОЛЬСТАВНЯ ПРОХОДА',
+    x: 5.4,
+    z: -13.5,
+    width: 4.8,
+    axis: 'z',
+    panelX: 4.2,
+    panelZ: -10.6,
+    collider: { x1: 4.95, z1: -15.9, x2: 5.85, z2: -11.1, tall: true },
+  },
+];
+
+export interface ShutterRuntimeState {
+  status: 'open' | 'sealed' | 'cooldown';
+  timer: number;
+  hp: number;
+  maxHp: number;
+}
+
+export interface ShutterStepOutcome {
+  state: ShutterRuntimeState;
+  justSealed: boolean;
+  justBreached: boolean;
+  justOpened: boolean;
+  justReady: boolean;
+}
+
+export function updateShutterState(
+  current: ShutterRuntimeState,
+  dt: number,
+  triggerSeal: boolean,
+  incomingDamage = 0,
+): ShutterStepOutcome {
+  const next: ShutterRuntimeState = { ...current };
+  let justSealed = false;
+  let justBreached = false;
+  let justOpened = false;
+  let justReady = false;
+
+  if (next.status === 'open') {
+    if (triggerSeal) {
+      next.status = 'sealed';
+      next.timer = SHUTTER_DURATION_SEC;
+      next.hp = next.maxHp;
+      justSealed = true;
+    }
+    return { state: next, justSealed, justBreached, justOpened, justReady };
+  }
+
+  if (next.status === 'sealed') {
+    next.timer = Math.max(0, next.timer - dt);
+    if (incomingDamage > 0) {
+      next.hp = Math.max(0, next.hp - incomingDamage);
+    }
+    if (next.hp <= 0) {
+      next.status = 'cooldown';
+      next.timer = SHUTTER_COOLDOWN_SEC;
+      justBreached = true;
+    } else if (next.timer <= 0) {
+      next.status = 'cooldown';
+      next.timer = SHUTTER_COOLDOWN_SEC;
+      justOpened = true;
+    }
+    return { state: next, justSealed, justBreached, justOpened, justReady };
+  }
+
+  // cooldown
+  next.timer = Math.max(0, next.timer - dt);
+  if (next.timer <= 0) {
+    next.status = 'open';
+    next.timer = 0;
+    next.hp = next.maxHp;
+    justReady = true;
+  }
+  return { state: next, justSealed, justBreached, justOpened, justReady };
+}
+
+export interface DirectionalDamageResult {
+  damage: number;
+  hitKind: 'normal' | 'armor_deflect' | 'flank_crit' | 'ap_pierce';
+}
+
+/**
+ * Computes directional armor damage:
+ * - Armored enemies resist frontal hits (0.38x + ricochet)
+ * - Flanking or shooting them from behind (shot direction aligned with enemy facing, dot > 0.25)
+ *   bypasses frontal riot armor for 1.30x critical damage!
+ * - Armor-piercing weapons / explosives ignore frontal plating (1.0x).
+ */
+export function computeDirectionalArmorDamage(
+  baseDamage: number,
+  armored: boolean,
+  armorPiercing: boolean,
+  hitDirX: number,
+  hitDirZ: number,
+  enemyYaw: number,
+): DirectionalDamageResult {
+  if (!armored) {
+    return { damage: Math.max(1, Math.round(baseDamage)), hitKind: 'normal' };
+  }
+  if (armorPiercing) {
+    return { damage: Math.max(1, Math.round(baseDamage)), hitKind: 'ap_pierce' };
+  }
+  const len = Math.hypot(hitDirX, hitDirZ) || 1;
+  const nx = hitDirX / len;
+  const nz = hitDirZ / len;
+  // Enemy forward vector in Three.js Y-up yaw convention (matches Math.atan2(dx, dz))
+  const fwdX = Math.sin(enemyYaw);
+  const fwdZ = Math.cos(enemyYaw);
+  // dot > 0 means projectile travels in same direction enemy faces -> hit from rear/flank!
+  const dot = nx * fwdX + nz * fwdZ;
+  if (dot > 0.22) {
+    return { damage: Math.max(1, Math.round(baseDamage * 1.3)), hitKind: 'flank_crit' };
+  }
+  return { damage: Math.max(4, Math.round(baseDamage * 0.38)), hitKind: 'armor_deflect' };
+}
+
+/**
+ * Dynamic movement-vs-stationary weapon spread multiplier:
+ * - Standing still or holding cover tightens spread to 0.68x
+ * - Moving / strafing widens bloom to 1.45x
+ * - Sprinting / dashing widens bloom further to 1.75x
+ */
+export function computeWeaponSpread(
+  baseSpread: number,
+  isMoving: boolean,
+  isHoldingCover = false,
+): number {
+  if (!isMoving) {
+    return baseSpread * (isHoldingCover ? 0.58 : 0.68);
+  }
+  return baseSpread * 1.45;
+}
+
+export interface ReloadConsumeResult {
+  newMag: number;
+  newReserve: number;
+  loaded: number;
+}
+
+/**
+ * Transfers rounds from finite reserve ammo pool into the active magazine.
+ */
+export function consumeReserveForReload(
+  magAmmo: number,
+  magMax: number,
+  reserveAmmo: number,
+): ReloadConsumeResult {
+  const needed = Math.max(0, magMax - magAmmo);
+  const loaded = Math.min(needed, Math.max(0, reserveAmmo));
+  return {
+    newMag: magAmmo + loaded,
+    newReserve: Math.max(0, reserveAmmo - loaded),
+    loaded,
+  };
+}
+
+export const DOWNED_BLEEDOUT_SEC = 22.0;
+export const REVIVE_DURATION_SEC = 1.8;
+export const REVIVE_INTERACT_RADIUS = 2.5;
+
+export interface DownedStepResult {
+  bleedoutTimer: number;
+  reviveProgress: number;
+  revivedNow: boolean;
+  bledOutNow: boolean;
+}
+
+/**
+ * Updates a downed squadmate's bleedout countdown and [E] revival progress.
+ * Bleedout pauses while a teammate is actively reviving them.
+ */
+export function updateDownedUnit(
+  bleedoutTimer: number,
+  reviveProgress: number,
+  rescuerInRange: boolean,
+  interacting: boolean,
+  reviveSpeedMult: number,
+  dt: number,
+): DownedStepResult {
+  if (rescuerInRange && interacting) {
+    const nextProg = Math.min(1, reviveProgress + (dt * reviveSpeedMult) / REVIVE_DURATION_SEC);
+    return {
+      bleedoutTimer,
+      reviveProgress: nextProg,
+      revivedNow: nextProg >= 1,
+      bledOutNow: false,
+    };
+  }
+  const nextBleed = Math.max(0, bleedoutTimer - dt);
+  const decayedProg = Math.max(0, reviveProgress - dt * 0.45);
+  return {
+    bleedoutTimer: nextBleed,
+    reviveProgress: decayedProg,
+    revivedNow: false,
+    bledOutNow: nextBleed <= 0,
+  };
+}
+
 
 
 

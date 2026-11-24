@@ -95,10 +95,10 @@ export function StatusModal({
         <div className="flex items-center justify-between gap-3">
           <div className="font-display text-xs font-bold tracking-[0.2em] text-[#4ce0e8] uppercase">
             {isPaused
-              ? '港都 MINATO CITY // ПАУЗА'
+              ? '港都 MINATO CITY · ПАУЗА'
               : isVictory
-                ? '港都 MINATO CITY // ЭВАКУАЦИЯ'
-                : 'КВАРТАЛ А-3 // ПОРАЖЕНИЕ'}
+                ? '港都 MINATO CITY · ЭВАКУАЦИЯ'
+                : 'КВАРТАЛ А-3 · ПОРАЖЕНИЕ'}
           </div>
 
           {isPaused && (
@@ -196,7 +196,7 @@ export function StatusModal({
             <div className="bg-[#0b0e1c] border border-[#2c365c] px-3 py-1.5 flex items-center justify-between font-display text-[10px] tracking-[0.12em] uppercase">
               <span className="text-[#9db0d9]">ГЕНЕРАТОР B1 «立体駐車場»</span>
               <span className={summary.generatorActivated ? 'text-[#4ce0e8] font-bold' : 'text-[#6e7ca4]'}>
-                {summary.generatorActivated ? '⚡ АКТИВИРОВАН' : 'НЕ ЗАПУЩЕН'}
+                {summary.generatorActivated ? 'АКТИВИРОВАН' : 'НЕ ЗАПУЩЕН'}
               </span>
             </div>
           </div>

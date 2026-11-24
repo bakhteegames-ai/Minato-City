@@ -8,7 +8,8 @@ interface TitleOverlayProps {
 }
 
 const MOOD_LABELS: Record<LightingMood, string> = {
-  night: 'Ночь · Неон',
+  night: 'Ночь · Нуар',
+  day: 'День · Эталон',
   sunset: 'Закат · City Pop',
   mist: 'Портовый туман',
 };
@@ -133,9 +134,9 @@ export function TitleOverlay({ mood, onStart, onCycleMood, onOpenAssetLab }: Tit
         </div>
       </div>
 
-      {/* Flat borderless control-hint line in bottom safe margin */}
-      <div className="text-xs sm:text-[13px] tracking-wide text-[#cfd8f2]/85 hud-text-stroke">
-        WASD Бег · Shift Перекат · ЛКМ Огонь · R Перезарядка · F Шашка · Tab Боец · 1–4 Навыки · V Осмотр · Esc Пауза
+      {/* High-contrast control-hint strip in bottom safe margin */}
+      <div className="inline-block self-start bg-[#090d16]/90 border border-white/15 px-3.5 py-1.5 text-xs sm:text-[13px] tracking-wide text-[#e2e8f8] hud-text-stroke">
+        WASD Бег · Shift Перекат · ЛКМ Огонь · ПКМ Камера · R Перезарядка · Q Приказ · E Действие · F Шашка · Tab Боец · 1–4 Навыки
       </div>
     </div>
   );

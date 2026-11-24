@@ -35,7 +35,13 @@ export type SoundEffectKind =
   | 'barrelHit'
   | 'generatorOnline'
   | 'stanceOrder'
-  | 'ammoCrate';
+  | 'ammoCrate'
+  | 'shotgun'
+  | 'shutterClose'
+  | 'shutterClang'
+  | 'reviveDone'
+  | 'flankCrit'
+  | 'emptyClick';
 
 export interface PlaySoundOptions {
   pan?: number;
@@ -685,6 +691,44 @@ export class MinatoAudioEngine {
       case 'ammoCrate':
         this.playAmmoCrate(ctx, now);
         break;
+
+      case 'shotgun':
+        this.playFirearm(ctx, now, {
+          thumpStart: 95 * jitter,
+          thumpEnd: 20,
+          thumpDur: 0.2,
+          thumpGain: 0.62,
+          bodyFreq: 480 * jitter,
+          bodyQ: 0.55,
+          bodyDur: 0.24,
+          bodyGain: 0.48,
+          crackFreq: 2400 * jitter,
+          crackDur: 0.055,
+          crackGain: 0.36,
+          reverbAmt: 0.72,
+          mechPing: 1900 * jitter,
+        });
+        break;
+
+      case 'shutterClose':
+        this.playShutterSlam(ctx, now);
+        break;
+
+      case 'shutterClang':
+        this.playBarrelClang(ctx, now, jitter * 0.85);
+        break;
+
+      case 'reviveDone':
+        this.playWarmChord(ctx, now, [329.63, 415.3, 493.88, 659.25], 0.72, 0.16);
+        break;
+
+      case 'flankCrit':
+        this.playFlankCrit(ctx, now, jitter);
+        break;
+
+      case 'emptyClick':
+        this.playTacticalClick(ctx, now);
+        break;
     }
     } finally {
       this.sfxBus = savedSfxBus;
@@ -1223,5 +1267,44 @@ export class MinatoAudioEngine {
       src.start(now + off, Math.random() * 0.4, 0.06);
     });
     this.playWarmChord(ctx, now + 0.08, [329.63, 440.0, 523.25, 659.25], 0.55, 0.15);
+  }
+
+  private playShutterSlam(ctx: AudioContext, now: number): void {
+    if (!this.brownBuffer || !this.whiteBuffer || !this.sfxBus || !this.reverbSend) return;
+    // Heavy corrugated steel shutter rattling down + bottom lock slam
+    const rattle = ctx.createBufferSource();
+    rattle.buffer = this.brownBuffer;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(520, now);
+    bp.frequency.linearRampToValueAtTime(180, now + 0.36);
+    bp.Q.value = 1.6;
+    const rg = ctx.createGain();
+    rg.gain.setValueAtTime(0.01, now);
+    rg.gain.linearRampToValueAtTime(0.28, now + 0.06);
+    rg.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+    rattle.connect(bp);
+    bp.connect(rg);
+    rg.connect(this.sfxBus);
+    rg.connect(this.reverbSend);
+    rattle.start(now, Math.random() * 0.6, 0.45);
+
+    this.playBarrelClang(ctx, now + 0.32, 0.72);
+  }
+
+  private playFlankCrit(ctx: AudioContext, now: number, jitter: number): void {
+    if (!this.whiteBuffer || !this.sfxBus) return;
+    this.playFleshHit(ctx, now, jitter * 1.1);
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(880 * jitter, now);
+    osc.frequency.exponentialRampToValueAtTime(1320 * jitter, now + 0.075);
+    g.gain.setValueAtTime(0.14, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+    osc.connect(g);
+    g.connect(this.sfxBus);
+    osc.start(now);
+    osc.stop(now + 0.1);
   }
 }

@@ -323,6 +323,39 @@ export function createUrbanConcreteMaterial(
     }
   }
 
+  // Macro weathered plaster & soot blotches (breaks uniform grid tiling repetition!)
+  const patchLightRgb = hexToRgb(lightHex);
+  const patchDarkRgb = hexToRgb(darkHex);
+  for (let i = 0; i < 14; i++) {
+    const bx = rand() * size;
+    const by = rand() * size;
+    const br = 22 + rand() * 54;
+    const g = actx.createRadialGradient(bx, by, 4, bx, by, br);
+    const isLightPatch = rand() > 0.52;
+    g.addColorStop(
+      0,
+      isLightPatch ? rgba(patchLightRgb, 0.22 + rand() * 0.14) : rgba(patchDarkRgb, 0.24 + rand() * 0.16),
+    );
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    actx.fillStyle = g;
+    actx.beginPath();
+    actx.arc(bx, by, br, 0, Math.PI * 2);
+    actx.fill();
+
+    // Varied roughness across weathered patches
+    rctx.fillStyle = isLightPatch ? 'rgba(246,246,246,0.22)' : 'rgba(184,184,184,0.24)';
+    rctx.beginPath();
+    rctx.arc(bx, by, br * 0.8, 0, Math.PI * 2);
+    rctx.fill();
+  }
+
+  // Subtle horizontal damp/soot band along lower concrete edge
+  const dampGrad = actx.createLinearGradient(0, size * 0.72, 0, size);
+  dampGrad.addColorStop(0, 'rgba(18, 20, 24, 0)');
+  dampGrad.addColorStop(1, 'rgba(18, 20, 24, 0.28)');
+  actx.fillStyle = dampGrad;
+  actx.fillRect(0, size * 0.72, size, size * 0.28);
+
   // Rainwater vertical grime drips
   const drips = Math.round(28 * (opts.grimeStrength ?? 1));
   for (let i = 0; i < drips; i++) {
@@ -754,7 +787,7 @@ function getCreaseLineMaterial(): THREE.LineBasicMaterial {
     sharedCreaseLineMat = new THREE.LineBasicMaterial({
       color: 0x11141c,
       transparent: true,
-      opacity: 0.58,
+      opacity: 0.36,
       depthWrite: false,
     });
   }

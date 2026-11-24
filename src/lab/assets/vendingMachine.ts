@@ -24,22 +24,22 @@ import { ASSET_CATALOG, type BuiltLabAsset } from './types';
 function createDrinkContainerGeo(isBottle: boolean): THREE.BufferGeometry {
   const pts = isBottle
     ? [
-        new THREE.Vector2(0.0, 0.0),
+        new THREE.Vector2(0.002, 0.0),
         new THREE.Vector2(0.032, 0.0),
         new THREE.Vector2(0.034, 0.015),
         new THREE.Vector2(0.034, 0.115),
         new THREE.Vector2(0.022, 0.155),
         new THREE.Vector2(0.013, 0.175),
         new THREE.Vector2(0.015, 0.192),
-        new THREE.Vector2(0.0, 0.192),
+        new THREE.Vector2(0.002, 0.192),
       ]
     : [
-        new THREE.Vector2(0.0, 0.0),
+        new THREE.Vector2(0.002, 0.0),
         new THREE.Vector2(0.027, 0.0),
         new THREE.Vector2(0.033, 0.012),
         new THREE.Vector2(0.033, 0.118),
         new THREE.Vector2(0.026, 0.132),
-        new THREE.Vector2(0.0, 0.132),
+        new THREE.Vector2(0.002, 0.132),
       ];
   const raw = new THREE.LatheGeometry(pts, 10);
   applyBoxUVs(raw, 4.0);
@@ -55,10 +55,11 @@ function createDrinkContainerGeo(isBottle: boolean): THREE.BufferGeometry {
  * 18 individual lathed drink cans/bottles, beveled stainless control panel,
  * recessed dispensing chute with hinged flap, side ventilation louvers & power conduit.
  */
-export function buildVendingMachineAsset(): BuiltLabAsset {
+export function buildVendingMachineAsset(opts: { includeCreaseInk?: boolean } = {}): BuiltLabAsset {
   const meta = ASSET_CATALOG.find((m) => m.id === 'vending')!;
   const root = new THREE.Group();
   root.name = 'Asset_VendingMachine';
+  const ink = opts.includeCreaseInk ?? true;
 
   // Weathered retro Japanese vermilion-rust + aged cream + dark gunmetal steel
   const cabinetRedMat = createPaintedMetalMaterial({
@@ -174,7 +175,7 @@ export function buildVendingMachineAsset(): BuiltLabAsset {
   root.add(
     createStylizedMesh(mergedCabinet, cabinetRedMat, {
       name: 'vending_cabinet',
-      creaseThresholdDeg: 32,
+      creaseThresholdDeg: ink ? 44 : 0,
     }),
   );
 
@@ -196,7 +197,7 @@ export function buildVendingMachineAsset(): BuiltLabAsset {
   root.add(
     createStylizedMesh(mergedCream, creamEnamelMat, {
       name: 'cream_bezel',
-      creaseThresholdDeg: 32,
+      creaseThresholdDeg: ink ? 44 : 0,
     }),
   );
 
@@ -247,7 +248,7 @@ export function buildVendingMachineAsset(): BuiltLabAsset {
   }
   const mergedShelves = mergeParts(shelfGeos);
   bakeVerticalGradientAO(mergedShelves, 0.85, 1.04);
-  root.add(createStylizedMesh(mergedShelves, brushedSteelMat, { name: 'drink_shelves', creaseThresholdDeg: 36 }));
+  root.add(createStylizedMesh(mergedShelves, brushedSteelMat, { name: 'drink_shelves', creaseThresholdDeg: 0 }));
 
   // 18 individual faceted cans & bottles grouped by 5 muted retro drink colors
   const drinkColors = ['#2e6a4f', '#b84232', '#355f85', '#c88d36', '#d8cfbe'];
@@ -326,7 +327,7 @@ export function buildVendingMachineAsset(): BuiltLabAsset {
   root.add(
     createStylizedMesh(mergedControl, brushedSteelMat, {
       name: 'control_hardware',
-      creaseThresholdDeg: 32,
+      creaseThresholdDeg: 0,
     }),
   );
 
@@ -346,13 +347,13 @@ export function buildVendingMachineAsset(): BuiltLabAsset {
   root.add(
     createStylizedMesh(mergeParts(coldBtnGeos), buttonColdMat, {
       name: 'buttons_cold',
-      creaseThresholdDeg: 40,
+      creaseThresholdDeg: 0,
     }),
   );
   root.add(
     createStylizedMesh(mergeParts(hotBtnGeos), buttonWarmMat, {
       name: 'buttons_hot',
-      creaseThresholdDeg: 40,
+      creaseThresholdDeg: 0,
     }),
   );
 
@@ -408,7 +409,7 @@ export function buildVendingMachineAsset(): BuiltLabAsset {
 
   const mergedDark = mergeParts(darkGeos);
   bakeVerticalGradientAO(mergedDark, 0.62, 1.0);
-  root.add(createStylizedMesh(mergedDark, gunmetalMat, { name: 'chute_and_vents', creaseThresholdDeg: 34 }));
+  root.add(createStylizedMesh(mergedDark, gunmetalMat, { name: 'chute_and_vents', creaseThresholdDeg: 0 }));
 
   // 4 heavy rubber leveling feet
   const footGeos: THREE.BufferGeometry[] = [];
@@ -421,7 +422,7 @@ export function buildVendingMachineAsset(): BuiltLabAsset {
   }
   const mergedFeet = mergeParts(footGeos);
   bakeVerticalGradientAO(mergedFeet, 0.65, 0.95);
-  root.add(createStylizedMesh(mergedFeet, rubberFootMat, { name: 'leveling_feet', creaseThresholdDeg: 38 }));
+  root.add(createStylizedMesh(mergedFeet, rubberFootMat, { name: 'leveling_feet', creaseThresholdDeg: 0 }));
 
   groundObjectAtZero(root);
   const stats = computeAssetStats(root);

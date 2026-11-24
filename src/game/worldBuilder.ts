@@ -1,8 +1,16 @@
 import * as THREE from 'three';
 import { enableOutlineLayer, type AnimatedGlbInstance } from './assetPipeline';
+import { buildVendingMachineAsset } from '../lab/assets/vendingMachine';
 import type { ColliderBox, LightingMood, VehicleKind } from './types';
 import type { MinatoTextureBank } from './textures';
-import { B1_GENERATOR, type NeonFlickerStyle } from './rules';
+import {
+  B1_GENERATOR,
+  B1_PIT,
+  OVERLOOK_DECK,
+  SHUTTER_SPECS,
+  getTerrainHeightAt,
+  type NeonFlickerStyle,
+} from './rules';
 import {
   buildB1Generator,
   buildConvexTrafficMirror,
@@ -11,16 +19,34 @@ import {
   buildParkedBicycle,
   buildSakuraTree,
   buildSculptedVehicle,
+  buildSecurityShutterVisual,
   buildWaterTower,
   type B1GeneratorVisual,
+  type SecurityShutterVisual,
   type SharedModelAssets,
 } from './models';
+import {
+  buildModularUrbanUpperBlock,
+  buildSculptedAwning,
+  buildSculptedCobraStreetlamp,
+} from './sculptedArchitecture';
 
 export interface VehicleSlotInstance {
   kind: VehicleKind;
+  group: THREE.Group;
   proxyGroup: THREE.Group;
   customSlotMount: THREE.Group;
   glbInstance: AnimatedGlbInstance | null;
+  destructible: boolean;
+  x: number;
+  z: number;
+  elevY: number;
+  hx: number;
+  hz: number;
+  hp: number;
+  maxHp: number;
+  destroyed: boolean;
+  setCharred: (charred?: boolean) => void;
 }
 
 export interface OccludableVolume {
@@ -53,6 +79,7 @@ export interface MinatoWorldRefs {
   steamVents: SteamVentSpec[];
   sirenSprites: Array<{ red: THREE.Sprite; blue: THREE.Sprite }>;
   vehicles: VehicleSlotInstance[];
+  shutters: SecurityShutterVisual[];
   b1Generator: B1GeneratorVisual;
   parkCyanLight: THREE.PointLight;
   floodHalo: THREE.Sprite;
@@ -76,16 +103,23 @@ export function buildMinatoWorld(
   const sirenSprites: Array<{ red: THREE.Sprite; blue: THREE.Sprite }> = [];
   const vehicles: VehicleSlotInstance[] = [];
 
-  // Base atmospheric fog & sky (Luminous 70% nocturnal indigo-plum from Concept Art — never pure black!)
-  const fog = new THREE.FogExp2(0x161f3d, 0.0124);
-  scene.background = new THREE.Color(0x101830);
+  // Stage-Gate v2 Dual-Lighting Registry: cleanly switches between Restrained Noir Night and Neutral Daylight!
+  const nightOnlyVisuals: THREE.Object3D[] = [];
+  const nightEmissives: Array<{ mat: THREE.MeshStandardMaterial; night: number; day: number }> = [];
+  const registerNightEmissive = (mat: THREE.MeshStandardMaterial, nightIntensity: number, dayIntensity = 0.08) => {
+    nightEmissives.push({ mat, night: nightIntensity, day: dayIntensity });
+  };
+
+  // Base atmospheric fog & sky — Restrained Noir Night (no monochrome blue-violet crush!)
+  const fog = new THREE.FogExp2(0x161e2c, 0.0082);
+  scene.background = new THREE.Color(0x111722);
   scene.fog = fog;
 
-  // Balanced 3-Point 70/20/10 Lighting Rig: Luminous Indigo Sky Fill + Crisp Moonlight Key + Warm Storefront Rim
-  const hemiLight = new THREE.HemisphereLight(0x6e8ad8, 0x362448, 1.18);
+  // Balanced 3-Point Lighting Rig: Neutral Slate Sky Fill + Cool Moonlight Key + Warm Storefront Rim
+  const hemiLight = new THREE.HemisphereLight(0x7b92b8, 0x2f3440, 1.12);
   scene.add(hemiLight);
 
-  const moonLight = new THREE.DirectionalLight(0xaac8ff, 1.28);
+  const moonLight = new THREE.DirectionalLight(0xc4d4e8, 1.32);
   moonLight.position.set(28, 46, -34);
   if (!isSoftwareGl) {
     moonLight.castShadow = true;
@@ -101,8 +135,8 @@ export function buildMinatoWorld(
   }
   scene.add(moonLight);
 
-  // Subtle warm storefront fill from the south-west so heroes, yellow taxi & facades read with crisp 3D volume
-  const streetFill = new THREE.DirectionalLight(0xffb478, 0.46);
+  // Subtle warm storefront fill from the south-west so heroes, retro sedans & facades read with crisp 3D volume
+  const streetFill = new THREE.DirectionalLight(0xffb874, 0.62);
   streetFill.position.set(-22, 18, 26);
   scene.add(streetFill);
 
@@ -113,7 +147,7 @@ export function buildMinatoWorld(
         map: textures.glowHalo,
         color: colorHex,
         transparent: true,
-        opacity: opacity * 0.46,
+        opacity: opacity * 0.44,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
       }),
@@ -121,6 +155,7 @@ export function buildMinatoWorld(
     sp.position.set(x, y, z);
     sp.scale.set(sx, sy, 1);
     scene.add(sp);
+    nightOnlyVisuals.push(sp);
     return sp;
   };
 
@@ -131,7 +166,7 @@ export function buildMinatoWorld(
         map: textures.glowHalo,
         color: colorHex,
         transparent: true,
-        opacity: opacity * 0.68,
+        opacity: opacity * 0.52,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
       }),
@@ -139,6 +174,7 @@ export function buildMinatoWorld(
     m.rotation.x = -Math.PI / 2;
     m.position.set(x, 0.026, z);
     scene.add(m);
+    nightOnlyVisuals.push(m);
     return m;
   };
 
@@ -169,29 +205,34 @@ export function buildMinatoWorld(
     return m;
   };
 
-  // Extended Ground Plane (Wet Night Asphalt, rich charcoal-indigo with zero white circular hotspot!)
-  const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(180, 160),
-    new THREE.MeshStandardMaterial({
-      color: 0xb6c0dc,
-      map: textures.asphaltMap,
-      roughnessMap: textures.asphaltRough,
-      bumpMap: textures.asphaltBump,
-      bumpScale: 0.045,
-      roughness: 0.86,
-      metalness: 0.06,
-    }),
-  );
-  ground.rotation.x = -Math.PI / 2;
-  ground.receiveShadow = true;
-  ground.userData.skipOutline = true;
-  scene.add(ground);
+  // Segmented Wet Asphalt Ground Planes (leaves true physical opening for the -1.25m Sunken Parking B1 Pit!)
+  const asphaltMat = new THREE.MeshStandardMaterial({
+    color: 0x7e88a6,
+    map: textures.asphaltMap,
+    roughnessMap: textures.asphaltRough,
+    bumpMap: textures.asphaltBump,
+    bumpScale: 0.04,
+    roughness: 0.88,
+    metalness: 0.04,
+  });
+  const addGroundSlab = (x1: number, z1: number, x2: number, z2: number) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(x2 - x1, z2 - z1), asphaltMat);
+    m.rotation.x = -Math.PI / 2;
+    m.position.set((x1 + x2) / 2, 0, (z1 + z2) / 2);
+    m.receiveShadow = true;
+    m.userData.skipOutline = true;
+    scene.add(m);
+  };
+  addGroundSlab(-90, -80, B1_PIT.rampX1, 80); // West & main intersection street
+  addGroundSlab(B1_PIT.floorX2, -80, 90, 80); // Far east beyond B1
+  addGroundSlab(B1_PIT.rampX1, -80, B1_PIT.floorX2, B1_PIT.z1); // North of B1 pit
+  addGroundSlab(B1_PIT.rampX1, B1_PIT.z2, B1_PIT.floorX2, 80); // South of B1 pit
 
   // Raised Sidewalk Curbs
   const swMat = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+    color: 0xd0d6e4,
     map: textures.sidewalkMap,
-    roughness: 0.74,
+    roughness: 0.78,
   });
   const addSidewalk = (x1: number, z1: number, x2: number, z2: number) => {
     const m = new THREE.Mesh(new THREE.BoxGeometry(x2 - x1, 0.18, z2 - z1), swMat);
@@ -201,8 +242,7 @@ export function buildMinatoWorld(
   };
   addSidewalk(-29, -12, 6, 3.6);
   addSidewalk(-29, -28, 6, -12);
-  addSidewalk(17, -10, 33, 15.5);
-  addSidewalk(6, -28, 17, 2.5);
+  addSidewalk(6, -28, 17.5, 2.5);
 
   // Crisp Crosswalk Stripes & Lane Markings (offset by +0.025 on Y with polygonOffset to avoid Z-fighting)
   const paintMat = new THREE.MeshBasicMaterial({
@@ -246,7 +286,6 @@ export function buildMinatoWorld(
   const brickBlue = new THREE.MeshStandardMaterial({ color: 0xe0e8f6, map: textures.brickBlue, roughness: 0.86 });
   const concreteMat = new THREE.MeshStandardMaterial({ color: 0x4e5674, roughness: 0.84 });
   const roofMat = new THREE.MeshStandardMaterial({ color: 0x222844, roughness: 0.9 });
-  const awningMat = new THREE.MeshStandardMaterial({ color: 0xe6e8f0, map: textures.awningStripe, roughness: 0.78 });
 
   const addSolidBox = (
     x1: number,
@@ -265,23 +304,6 @@ export function buildMinatoWorld(
     scene.add(m);
     colliders.push({ x1, z1, x2, z2, tall });
     return m;
-  };
-
-  const addACUnit = (x: number, y: number, z: number, rotY = 0, parent: THREE.Object3D = scene) => {
-    const g = new THREE.Group();
-    g.position.set(x, y, z);
-    g.rotation.y = rotY;
-    const box = new THREE.Mesh(
-      new THREE.BoxGeometry(0.95, 0.65, 0.46),
-      new THREE.MeshStandardMaterial({ color: 0xbac3d6, roughness: 0.72 }),
-    );
-    box.castShadow = true;
-    g.add(box);
-    const fan = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.04, 12), assets.darkMetalMat);
-    fan.rotation.x = Math.PI / 2;
-    fan.position.set(-0.15, 0, 0.24);
-    g.add(fan);
-    parent.add(g);
   };
 
   // Shared physical glass glazing & warm interior materials for 3D Recessed Storefront Alcoves
@@ -499,44 +521,36 @@ export function buildMinatoWorld(
   addRecessedStorefront('records', textures.shopfrontRecords, -25.0, 1.78, 2.0, 4.4, 3.1, 0);
   addRecessedStorefront('records', textures.shopfrontRecords, -16.2, 1.78, 2.0, 4.2, 3.1, 0);
 
-  // Fadeable Cutaway Upper Story, Roof, Awning, Sign & Giant CITY POP Billboard (smoothly fades when squad walks inside!)
-  const recUpperBrick = brickDark.clone();
-  recUpperBrick.transparent = true;
-  const recUpperRoof = roofMat.clone();
-  recUpperRoof.transparent = true;
-  const recUpperConc = concreteMat.clone();
-  recUpperConc.transparent = true;
-  const recUpperAwning = awningMat.clone();
-  recUpperAwning.transparent = true;
-
+  // GATE 2: Sculpted Modular Upper Story, Ribbed Striped Awning, Sign & Giant CITY POP Billboard (smoothly fades when squad walks inside!)
   const recUpperGroup = new THREE.Group();
   scene.add(recUpperGroup);
 
-  const recUpperMesh = new THREE.Mesh(
-    new THREE.BoxGeometry(14.5, 6.75, 11.5),
-    [recUpperBrick, recUpperBrick, recUpperRoof, recUpperRoof, recUpperBrick, recUpperBrick],
-  );
-  recUpperMesh.position.set(-20.75, 3.85 + 6.75 / 2, -3.75);
-  recUpperMesh.castShadow = true;
-  recUpperMesh.receiveShadow = true;
-  recUpperGroup.add(recUpperMesh);
+  const recUpperSculpted = buildModularUrbanUpperBlock({
+    width: 14.5,
+    depth: 11.5,
+    baseY: 3.85,
+    floors: 2,
+    floorH: 3.35,
+    concreteHex: '#8c867c',
+    facadeHex: '#5f4d4b',
+    transparent: true,
+    includeBalconies: false,
+    includeSideWindows: true,
+    includeRoofMech: true,
+    seed: 311,
+  });
+  recUpperSculpted.group.position.set(-20.75, 0, -3.75);
+  recUpperGroup.add(recUpperSculpted.group);
+  registerNightEmissive(recUpperSculpted.emissiveWindowsMat, 0.78, 0.06);
 
-  const recRim = new THREE.Mesh(new THREE.BoxGeometry(15.0, 0.45, 12.0), recUpperConc);
-  recRim.position.set(-20.75, 10.8, -3.75);
-  recUpperGroup.add(recRim);
-  const recHvacMat = assets.darkMetalMat.clone();
-  recHvacMat.transparent = true;
-  const recHvac = new THREE.Mesh(new THREE.BoxGeometry(3.2, 1.35, 2.5), recHvacMat);
-  recHvac.position.set(-23.2, 11.4, -5.0);
-  recUpperGroup.add(recHvac);
+  const recAwningSculpted = buildSculptedAwning(9.8, 2.35, '#8f3432', '#cfc4ae', true, 341);
+  recAwningSculpted.group.position.set(-20.5, 3.82, 2.02);
+  recUpperGroup.add(recAwningSculpted.group);
 
-  const recAwning = new THREE.Mesh(new THREE.BoxGeometry(9.6, 0.22, 2.4), recUpperAwning);
-  recAwning.position.set(-20.5, 3.65, 3.12);
-  recAwning.rotation.x = 0.26;
-  recAwning.castShadow = true;
-  recUpperGroup.add(recAwning);
+  const recLampMat = assets.darkMetalMat.clone();
+  recLampMat.transparent = true;
 
-  const signRecordsMesh = addSignPlane(textures.signRecords, -20.5, 4.48, 2.12, 8.6, 1.48, 0, 0xffffff, 1.25);
+  const signRecordsMesh = addSignPlane(textures.signRecords, -20.5, 4.48, 2.24, 8.6, 1.48, 0, 0xffffff, 1.15);
   (signRecordsMesh.material as THREE.MeshStandardMaterial).transparent = true;
   recUpperGroup.add(signRecordsMesh);
   neonFlickers.push({
@@ -547,25 +561,23 @@ export function buildMinatoWorld(
     style: 'steady',
   });
 
-  const cityPopMesh = addSignPlane(textures.cityPopBillboard, -20.5, 7.85, 2.14, 10.6, 5.1, 0, 0xffffff, 0.96);
+  const cityPopMesh = addSignPlane(textures.cityPopBillboard, -20.5, 7.85, 2.26, 10.6, 5.1, 0, 0xffffff, 0.9);
   (cityPopMesh.material as THREE.MeshStandardMaterial).transparent = true;
   recUpperGroup.add(cityPopMesh);
 
   [-23.5, -17.5].forEach((lx) => {
-    const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.22, 0.55), recHvacMat);
-    lamp.position.set(lx, 10.65, 2.65);
+    const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.22, 0.55), recLampMat);
+    lamp.position.set(lx, 10.75, 2.65);
     recUpperGroup.add(lamp);
-    const halo = addGlowHalo(lx, 10.35, 2.75, 0xffd088, 2.7, 2.7, 0.68);
+    const halo = addGlowHalo(lx, 10.45, 2.75, 0xffd088, 2.7, 2.7, 0.62);
     recUpperGroup.add(halo);
   });
 
   occludables.push({
     materials: [
-      recUpperBrick,
-      recUpperRoof,
-      recUpperConc,
-      recHvacMat,
-      recUpperAwning,
+      ...recUpperSculpted.materials,
+      ...recAwningSculpted.materials,
+      recLampMat,
       signRecordsMesh.material as THREE.MeshStandardMaterial,
       cityPopMesh.material as THREE.MeshStandardMaterial,
     ],
@@ -575,20 +587,13 @@ export function buildMinatoWorld(
     extraZones: [{ x1: -28.5, z1: -26.5, x2: -2.0, z2: -9.4 }],
   });
 
-  addACUnit(-27.2, 6.2, 2.25, 0, recUpperGroup);
-
-  // Iconic Red Japanese Vending Machine on Sidewalk
-  addSolidBox(
-    -26.9,
-    2.2,
-    -25.5,
-    3.2,
-    2.15,
-    new THREE.MeshStandardMaterial({ color: 0xc22b3e, roughness: 0.42 }),
-    false,
-  );
-  addSignPlane(textures.vendingFront, -26.2, 1.15, 3.24, 1.32, 2.02, 0, 0xffe4bf, 1.18);
-  addGlowHalo(-26.2, 1.4, 3.55, 0xffcf96, 3.3, 3.3, 0.52);
+  // Asset Lab Stylized Japanese Vending Machine mounted flush on sidewalk (+0.18m)
+  const labVending = buildVendingMachineAsset({ includeCreaseInk: false });
+  labVending.root.position.set(-26.15, 0.18, 2.68);
+  labVending.root.scale.setScalar(1.06);
+  scene.add(labVending.root);
+  colliders.push({ x1: -26.85, z1: 2.15, x2: -25.45, z2: 3.18, tall: false });
+  addGlowHalo(-26.15, 1.55, 3.35, 0xffd29c, 3.0, 3.0, 0.46);
 
   // Local warm + magenta point lights (within 5-light budget)
   const cityPopLight = new THREE.PointLight(0xf45b8a, 3.2, 24);
@@ -684,42 +689,38 @@ export function buildMinatoWorld(
   // Ground floor (h = 3.85) stays solid; upper story + rooftop water tower cut away cleanly when squad enters Sakura Courtyard behind it!
   addSolidBox(-6.8, -9.5, 5.6, 2.0, 3.85, [brickCafe, brickCafe, roofMat, roofMat, brickCafe, brickCafe], true);
 
+  // GATE 2: Sculpted Modular Upper Story for Corner Café (pilasters, recessed windows, balconies, ribbed awning)
   const cafeUpperGroup = new THREE.Group();
   scene.add(cafeUpperGroup);
-  const cafeUpperBrick = brickCafe.clone();
-  cafeUpperBrick.transparent = true;
-  const cafeUpperRoof = roofMat.clone();
-  cafeUpperRoof.transparent = true;
-  const cafeUpperConc = concreteMat.clone();
-  cafeUpperConc.transparent = true;
 
-  const cafeUpperMesh = new THREE.Mesh(
-    new THREE.BoxGeometry(12.4, 5.95, 11.5),
-    [cafeUpperBrick, cafeUpperBrick, cafeUpperRoof, cafeUpperRoof, cafeUpperBrick, cafeUpperBrick],
-  );
-  cafeUpperMesh.position.set(-0.6, 3.85 + 5.95 / 2, -3.75);
-  cafeUpperMesh.castShadow = true;
-  cafeUpperMesh.receiveShadow = true;
-  cafeUpperGroup.add(cafeUpperMesh);
-
-  const cafeCornice = new THREE.Mesh(new THREE.BoxGeometry(13.0, 0.45, 12.1), cafeUpperConc);
-  cafeCornice.position.set(-0.6, 4.65, -3.75);
-  cafeUpperGroup.add(cafeCornice);
-  const cafeRoofRim = new THREE.Mesh(new THREE.BoxGeometry(13.0, 0.48, 12.1), cafeUpperConc);
-  cafeRoofRim.position.set(-0.6, 10.0, -3.75);
-  cafeUpperGroup.add(cafeRoofRim);
+  const cafeUpperSculpted = buildModularUrbanUpperBlock({
+    width: 12.4,
+    depth: 11.5,
+    baseY: 3.85,
+    floors: 2,
+    floorH: 3.0,
+    concreteHex: '#948d81',
+    facadeHex: '#7d4d42',
+    transparent: true,
+    includeBalconies: true,
+    includeSideWindows: true,
+    includeRoofMech: false,
+    seed: 321,
+  });
+  cafeUpperSculpted.group.position.set(-0.6, 0, -3.75);
+  cafeUpperGroup.add(cafeUpperSculpted.group);
+  registerNightEmissive(cafeUpperSculpted.emissiveWindowsMat, 0.85, 0.06);
 
   addRecessedStorefront('cafe', textures.cafeWindow, -0.6, 1.78, 2.0, 10.4, 3.1, 0);
   addRecessedStorefront('cafe', textures.cafeWindow, 5.6, 1.78, -2.5, 7.6, 3.1, Math.PI / 2);
-  const cafeAwning = new THREE.Mesh(new THREE.BoxGeometry(11.4, 0.22, 2.55), awningMat);
-  cafeAwning.position.set(-0.6, 3.58, 3.18);
-  cafeAwning.rotation.x = 0.26;
-  cafeAwning.castShadow = true;
-  scene.add(cafeAwning);
 
-  const signCafeMesh = addSignPlane(textures.signCafe, -0.6, 5.55, 2.1, 5.6, 1.8, 0, 0xff5e87, 1.05);
+  const cafeAwningSculpted = buildSculptedAwning(11.4, 2.45, '#963434', '#d4c9b4', false, 345);
+  cafeAwningSculpted.group.position.set(-0.6, 3.76, 2.02);
+  scene.add(cafeAwningSculpted.group);
+
+  const signCafeMesh = addSignPlane(textures.signCafe, -0.6, 5.42, 2.24, 5.6, 1.8, 0, 0xff5e87, 1.05);
   (signCafeMesh.material as THREE.MeshStandardMaterial).transparent = true;
-  const signCafeHalo = addGlowHalo(-0.6, 5.55, 2.45, 0xff5a82, 7.8, 3.8, 0.44);
+  const signCafeHalo = addGlowHalo(-0.6, 5.42, 2.55, 0xff5a82, 7.4, 3.6, 0.42);
   cafeUpperGroup.add(signCafeMesh, signCafeHalo);
   neonFlickers.push({
     mat: signCafeMesh.material as THREE.MeshStandardMaterial,
@@ -731,7 +732,7 @@ export function buildMinatoWorld(
   });
   const kissatenMesh = addSignPlane(textures.kissatenVertical, 6.2, 6.7, 1.6, 1.5, 3.8, 0, 0xff6e7a, 1.05);
   (kissatenMesh.material as THREE.MeshStandardMaterial).transparent = true;
-  const kissatenHalo = addGlowHalo(6.2, 6.7, 2.0, 0xff5e73, 4.4, 5.8, 0.42);
+  const kissatenHalo = addGlowHalo(6.2, 6.7, 2.0, 0xff5e73, 4.2, 5.4, 0.4);
   cafeUpperGroup.add(kissatenMesh, kissatenHalo);
   neonFlickers.push({
     mat: kissatenMesh.material as THREE.MeshStandardMaterial,
@@ -741,18 +742,15 @@ export function buildMinatoWorld(
     phase: 4.1,
     style: 'buzz',
   });
-  addACUnit(-6.2, 5.4, 2.25, 0, cafeUpperGroup);
 
-  // Rooftop Water Tower
+  // Rooftop Water Tower seated cleanly on the sculpted Café roof slab (Y = 3.85 + 6.0 = 9.85m)
   const waterTower = buildWaterTower(assets.darkMetalMat);
-  waterTower.position.set(1.2, 9.8, -3.5);
+  waterTower.position.set(1.2, 9.9, -3.5);
   cafeUpperGroup.add(waterTower);
 
   occludables.push({
     materials: [
-      cafeUpperBrick,
-      cafeUpperRoof,
-      cafeUpperConc,
+      ...cafeUpperSculpted.materials,
       signCafeMesh.material as THREE.MeshStandardMaterial,
       kissatenMesh.material as THREE.MeshStandardMaterial,
     ],
@@ -772,7 +770,25 @@ export function buildMinatoWorld(
   // LANDMARK 4 (CENTER-EAST): «海風・中央商店街» SHOPPING ARCADE + WALKABLE SERVICE PASSAGE
   // =========================================================================
   // Split north-west arcade building so z: -15.8..-10.5 is a 4.3m walkable Service Passage to Sakura Courtyard!
-  addSolidBox(-2.0, -26.5, 5.6, -15.8, 8.6, [brickBlue, brickBlue, roofMat, roofMat, brickBlue, brickBlue], true);
+  addSolidBox(-2.0, -26.5, 5.6, -15.8, 2.9, [brickBlue, brickBlue, roofMat, roofMat, brickBlue, brickBlue], true);
+  const arcNWUpper = buildModularUrbanUpperBlock({
+    width: 7.6,
+    depth: 10.7,
+    baseY: 2.9,
+    floors: 2,
+    floorH: 2.9,
+    concreteHex: '#868d94',
+    facadeHex: '#4b5c6e',
+    transparent: false,
+    includeBalconies: true,
+    includeSideWindows: true,
+    includeRoofMech: true,
+    seed: 331,
+  });
+  arcNWUpper.group.position.set(1.8, 0, -21.15);
+  scene.add(arcNWUpper.group);
+  registerNightEmissive(arcNWUpper.emissiveWindowsMat, 0.78, 0.06);
+
   // Overhead masonry bridge above Service Passage (fades when squad flanks through!)
   const svcBridgeMat = brickBlue.clone();
   svcBridgeMat.transparent = true;
@@ -791,7 +807,25 @@ export function buildMinatoWorld(
   addGlowHalo(1.8, 3.1, -13.2, 0xffa852, 5.2, 4.2, 0.45);
   addWetReflection(1.8, -13.2, 6.4, 3.6, 0xffa852, 0.24);
 
-  addSolidBox(17.2, -26.5, 28.0, -9.5, 8.8, [brickDark, brickDark, roofMat, roofMat, brickDark, brickDark], true);
+  // East Arcade Building: Solid ground plinth + Sculpted 2-Story Modular Urban Upper Block
+  addSolidBox(17.2, -26.5, 28.0, -9.5, 2.9, [brickDark, brickDark, roofMat, roofMat, brickDark, brickDark], true);
+  const arcEastUpper = buildModularUrbanUpperBlock({
+    width: 10.8,
+    depth: 17.0,
+    baseY: 2.9,
+    floors: 2,
+    floorH: 3.0,
+    concreteHex: '#8d877e',
+    facadeHex: '#6c5c52',
+    transparent: false,
+    includeBalconies: true,
+    includeSideWindows: true,
+    includeRoofMech: true,
+    seed: 335,
+  });
+  arcEastUpper.group.position.set(22.6, 0, -18.0);
+  scene.add(arcEastUpper.group);
+  registerNightEmissive(arcEastUpper.emissiveWindowsMat, 0.82, 0.06);
 
   // Overhead arched Shopping Arcade canopy ribs + lanterns (auto-cutaway when fighting inside Arcade!)
   const arcadeCanopyGroup = new THREE.Group();
@@ -926,8 +960,60 @@ export function buildMinatoWorld(
   addGlowHalo(-24.25, 2.9, -21.1, 0x6ee782, 6.4, 3.4, 0.44);
 
   // =========================================================================
-  // LANDMARK 6 (EAST): PARKING «B1 / 立体駐車場» + EMERGENCY POWER GENERATOR
+  // LANDMARK 6 (EAST): SUNKEN PARKING «B1 / 立体駐車場» (-1.25m) + SLOPED RAMP + GENERATOR
   // =========================================================================
+  const b1FloorMat = new THREE.MeshStandardMaterial({
+    color: 0x3b4358,
+    roughness: 0.86,
+    metalness: 0.08,
+  });
+  const b1SpanZ = B1_PIT.z2 - B1_PIT.z1;
+  const b1MidZ = (B1_PIT.z1 + B1_PIT.z2) / 2;
+  const b1FlatW = B1_PIT.floorX2 - B1_PIT.rampX2;
+  const b1FlatFloor = new THREE.Mesh(new THREE.BoxGeometry(b1FlatW, 0.24, b1SpanZ), b1FloorMat);
+  b1FlatFloor.position.set((B1_PIT.rampX2 + B1_PIT.floorX2) / 2, B1_PIT.depth - 0.12, b1MidZ);
+  b1FlatFloor.receiveShadow = true;
+  b1FlatFloor.userData.skipOutline = true;
+  scene.add(b1FlatFloor);
+
+  // Sloped concrete ramp connecting main street (Y=0) down to B1 floor (Y=-1.25m)
+  const rampRun = B1_PIT.rampX2 - B1_PIT.rampX1;
+  const rampRise = Math.abs(B1_PIT.depth);
+  const rampHyp = Math.hypot(rampRun, rampRise);
+  const rampAngle = Math.atan2(rampRise, rampRun);
+  const b1Ramp = new THREE.Mesh(new THREE.BoxGeometry(rampHyp, 0.24, b1SpanZ), b1FloorMat);
+  b1Ramp.position.set((B1_PIT.rampX1 + B1_PIT.rampX2) / 2, B1_PIT.depth / 2 - 0.12, b1MidZ);
+  b1Ramp.rotation.z = -rampAngle;
+  b1Ramp.receiveShadow = true;
+  b1Ramp.userData.skipOutline = true;
+  scene.add(b1Ramp);
+
+  // Yellow safety hazard stripes across the B1 descent ramp lip
+  const rampHazard = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.55, b1SpanZ - 0.8),
+    new THREE.MeshStandardMaterial({ map: textures.barricade, roughness: 0.82 }),
+  );
+  rampHazard.rotation.x = -Math.PI / 2;
+  rampHazard.position.set(B1_PIT.rampX1 - 0.28, 0.032, b1MidZ);
+  rampHazard.userData.skipOutline = true;
+  scene.add(rampHazard);
+
+  // Retaining side walls along north & south edges of the sunken pit (north rises slightly as a garage safety parapet)
+  const pitWallN = new THREE.Mesh(
+    new THREE.BoxGeometry(B1_PIT.floorX2 - B1_PIT.rampX1 + 0.4, rampRise + 0.95, 0.36),
+    concreteMat,
+  );
+  pitWallN.position.set((B1_PIT.rampX1 + B1_PIT.floorX2) / 2, B1_PIT.depth + (rampRise + 0.95) / 2, B1_PIT.z1 - 0.12);
+  pitWallN.castShadow = true;
+  pitWallN.receiveShadow = true;
+  const pitWallS = new THREE.Mesh(
+    new THREE.BoxGeometry(B1_PIT.floorX2 - B1_PIT.rampX1 + 0.4, rampRise + 0.35, 0.36),
+    concreteMat,
+  );
+  pitWallS.position.set((B1_PIT.rampX1 + B1_PIT.floorX2) / 2, B1_PIT.depth + (rampRise + 0.35) / 2, B1_PIT.z2 + 0.12);
+  pitWallS.receiveShadow = true;
+  scene.add(pitWallN, pitWallS);
+
   [
     [18.4, -6],
     [18.4, 2.5],
@@ -936,22 +1022,23 @@ export function buildMinatoWorld(
     [29.5, 2.5],
     [29.5, 10.5],
   ].forEach(([px, pz]) => {
-    addSolidBox(px, pz, px + 1.1, pz + 1.1, 4.2, concreteMat, true);
+    const colBaseY = getTerrainHeightAt(px + 0.55, pz + 0.55);
+    addSolidBox(px, pz, px + 1.1, pz + 1.1, 4.2 - colBaseY, concreteMat, true, colBaseY);
   });
   // Bold «B1» concrete column stencils facing the intersection & arcade (Concept Art Sheet 1!)
   addSignPlane(textures.parkingB1Sign, 18.36, 1.85, 3.05, 1.06, 2.15, -Math.PI / 2, 0xffffff, 0.52);
   addSignPlane(textures.parkingB1Sign, 18.36, 1.85, 11.05, 1.06, 2.15, -Math.PI / 2, 0xffffff, 0.52);
   addSignPlane(textures.parkingB1Sign, 18.95, 1.85, 11.64, 1.06, 2.15, 0, 0xffffff, 0.52);
 
-  // Painted B1 Parking Stall Stripes & Yellow/Black Wheel Stops
+  // Painted B1 Parking Stall Stripes flush on the sunken -1.25m floor
   for (let sz = -4.2; sz <= 9.2; sz += 3.35) {
     const line = new THREE.Mesh(new THREE.PlaneGeometry(4.8, 0.14), paintMat);
     line.rotation.x = -Math.PI / 2;
-    line.position.set(26.6, 0.196, sz);
+    line.position.set(26.6, B1_PIT.depth + 0.025, sz);
     scene.add(line);
   }
 
-  addSolidBox(29.8, -6.5, 31.2, 11.8, 7.6, concreteMat, true);
+  addSolidBox(29.8, -6.5, 31.2, 11.8, 7.6 - B1_PIT.depth, concreteMat, true, B1_PIT.depth);
 
   const parkingDeckMat = concreteMat.clone();
   parkingDeckMat.transparent = true;
@@ -973,27 +1060,37 @@ export function buildMinatoWorld(
   const signParkingHalo = addGlowHalo(17.7, 5.25, 6.2, 0x4ce0e8, 7.0, 3.8, 0.36);
   parkingUpperGroup.add(signParkingMesh, signParkingHalo);
 
+  // Parent ceiling fluorescent tubes to parkingUpperGroup so they hide cleanly when camera looks inside B1
+  const cyanTubeMat = new THREE.MeshStandardMaterial({
+    color: 0x72f4fc,
+    emissive: 0x4ce0e8,
+    emissiveIntensity: 1.4,
+    roughness: 0.25,
+    transparent: true,
+    opacity: 1,
+  });
+  [-2, 6].forEach((tz) => {
+    const tube = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.14, 3.8), cyanTubeMat);
+    tube.position.set(22.5, 3.95, tz);
+    parkingUpperGroup.add(tube);
+    const tubeHalo = addGlowHalo(22.5, 3.8, tz, 0x4ce0e8, 5.8, 2.8, 0.42);
+    parkingUpperGroup.add(tubeHalo);
+  });
+
   occludables.push({
-    materials: [parkingDeckMat, signParkingMesh.material as THREE.MeshStandardMaterial],
+    materials: [parkingDeckMat, signParkingMesh.material as THREE.MeshStandardMaterial, cyanTubeMat],
     objects: [parkingUpperGroup],
     minOpacity: 0,
     zone: { x1: 17.2, z1: -7.5, x2: 31.5, z2: 12.6 },
   });
 
-  const cyanTube = new THREE.MeshBasicMaterial({ color: 0x72f4fc });
-  [-2, 6].forEach((tz) => {
-    const tube = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.14, 3.8), cyanTube);
-    tube.position.set(22.5, 3.95, tz);
-    scene.add(tube);
-    addGlowHalo(22.5, 3.8, tz, 0x4ce0e8, 5.8, 2.8, 0.42);
-  });
-  const parkCyanLight = new THREE.PointLight(0x4ce0e8, 2.4, 22);
-  parkCyanLight.position.set(23.5, 3.4, 1.5);
+  const parkCyanLight = new THREE.PointLight(0x4ce0e8, 2.8, 24);
+  parkCyanLight.position.set(23.5, 2.4, 1.5);
   scene.add(parkCyanLight);
 
-  // Interactive B1 Emergency Power Generator
+  // Interactive B1 Emergency Power Generator seated flush on sunken B1 floor (-1.25m)
   const b1Generator = buildB1Generator(assets, textures);
-  b1Generator.group.position.set(B1_GENERATOR.x, 0.18, B1_GENERATOR.z);
+  b1Generator.group.position.set(B1_GENERATOR.x, B1_PIT.depth, B1_GENERATOR.z);
   scene.add(b1Generator.group);
   colliders.push({
     x1: B1_GENERATOR.x - 1.15,
@@ -1001,6 +1098,89 @@ export function buildMinatoWorld(
     x2: B1_GENERATOR.x + 1.15,
     z2: B1_GENERATOR.z + 0.85,
     tall: false,
+  });
+
+  // =========================================================================
+  // LANDMARK 7 (SOUTH HIGH GROUND): ELEVATED TACTICAL OVERLOOK DECK (+1.50m)
+  // =========================================================================
+  const deckW = OVERLOOK_DECK.deckX2 - OVERLOOK_DECK.deckX1;
+  const deckD = OVERLOOK_DECK.z2 - OVERLOOK_DECK.z1;
+  const deckMidX = (OVERLOOK_DECK.deckX1 + OVERLOOK_DECK.deckX2) / 2;
+  const deckMidZ = (OVERLOOK_DECK.z1 + OVERLOOK_DECK.z2) / 2;
+
+  // Darker weathered industrial slate concrete matching Minato night value hierarchy
+  const overlookDeckMat = new THREE.MeshStandardMaterial({
+    color: 0x343c4e,
+    roughness: 0.9,
+    metalness: 0.08,
+  });
+  const overlookParapetMat = new THREE.MeshStandardMaterial({
+    color: 0x414a5e,
+    roughness: 0.86,
+    metalness: 0.1,
+  });
+
+  const deckBody = new THREE.Mesh(
+    new THREE.BoxGeometry(deckW, OVERLOOK_DECK.height, deckD),
+    overlookDeckMat,
+  );
+  deckBody.position.set(deckMidX, OVERLOOK_DECK.height / 2, deckMidZ);
+  deckBody.castShadow = true;
+  deckBody.receiveShadow = true;
+  scene.add(deckBody);
+
+  // Subtle top caution lip on Overlook Deck north edge
+  const deckTopStripe = new THREE.Mesh(
+    new THREE.PlaneGeometry(deckW, 0.32),
+    new THREE.MeshStandardMaterial({ map: textures.barricade, roughness: 0.84 }),
+  );
+  deckTopStripe.rotation.x = -Math.PI / 2;
+  deckTopStripe.position.set(deckMidX, OVERLOOK_DECK.height + 0.015, OVERLOOK_DECK.z1 + 0.2);
+  deckTopStripe.userData.skipOutline = true;
+  scene.add(deckTopStripe);
+
+  // Solid poured-concrete wedge ramps (West & East) up to +1.50m deck (no floating underside gaps)
+  const buildOverlookRamp = (x1: number, x2: number, risesRight: boolean) => {
+    const run = x2 - x1;
+    const shape = new THREE.Shape();
+    if (risesRight) {
+      shape.moveTo(0, 0);
+      shape.lineTo(run, 0);
+      shape.lineTo(run, OVERLOOK_DECK.height);
+      shape.closePath();
+    } else {
+      shape.moveTo(0, 0);
+      shape.lineTo(run, 0);
+      shape.lineTo(0, OVERLOOK_DECK.height);
+      shape.closePath();
+    }
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: deckD, bevelEnabled: false });
+    const ramp = new THREE.Mesh(geo, overlookDeckMat);
+    ramp.position.set(x1, 0, OVERLOOK_DECK.z1);
+    ramp.castShadow = true;
+    ramp.receiveShadow = true;
+    scene.add(ramp);
+  };
+  buildOverlookRamp(OVERLOOK_DECK.westRampX1, OVERLOOK_DECK.deckX1, true);
+  buildOverlookRamp(OVERLOOK_DECK.deckX2, OVERLOOK_DECK.eastRampX2, false);
+
+  // 2 Waist-High Concrete Parapet Cover Blocks on north edge of Overlook Deck (leaves clear sightlines & ramps!)
+  addSolidBox(-4.8, OVERLOOK_DECK.z1, -1.6, OVERLOOK_DECK.z1 + 0.42, 0.92, overlookParapetMat, false, OVERLOOK_DECK.height);
+  addSolidBox(0.8, OVERLOOK_DECK.z1, 3.6, OVERLOOK_DECK.z1 + 0.42, 0.92, overlookParapetMat, false, OVERLOOK_DECK.height);
+
+  // Warm work-lamp beacon marking the Tactical High Ground
+  const overlookPole = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.07, 2.2, 6), assets.darkMetalMat);
+  overlookPole.position.set(4.1, OVERLOOK_DECK.height + 1.1, OVERLOOK_DECK.z2 - 0.35);
+  scene.add(overlookPole);
+  addGlowHalo(4.1, OVERLOOK_DECK.height + 2.25, OVERLOOK_DECK.z2 - 0.35, 0xffc66e, 3.6, 3.6, 0.65);
+
+  // =========================================================================
+  // INTERACTIVE SECURITY SHUTTERS (РОЛЬСТАВНИ — [E])
+  // =========================================================================
+  const shutters: SecurityShutterVisual[] = SHUTTER_SPECS.map((spec) => {
+    const sh = buildSecurityShutterVisual(spec, assets, textures);
+    scene.add(sh.group);
+    return sh;
   });
 
   // Rooftop Red Security Floodlight Beacon
@@ -1026,35 +1206,17 @@ export function buildMinatoWorld(
   scene.add(floodCone);
 
   // =========================================================================
-  // JAPANESE UTILITY POLES, TRANSFORMERS & SAGGING CATENARY POWER LINES
+  // =========================================================================
+  // GATE 2: SCULPTED COBRA-HEAD STREETLAMPS, UTILITY POLES & CATENARY CABLES
   // =========================================================================
   const addUtilityPole = (x: number, z: number) => {
-    const g = new THREE.Group();
-    g.position.set(x, 0, z);
-    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.2, 9.4, 8), assets.darkMetalMat);
-    pole.position.y = 4.7;
-    pole.castShadow = true;
-    g.add(pole);
-    const cross = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.12, 0.14), assets.darkMetalMat);
-    cross.position.y = 8.6;
-    g.add(cross);
-    const transformer = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.28, 0.28, 0.85, 10),
-      new THREE.MeshStandardMaterial({ color: 0x3b445c, roughness: 0.6, metalness: 0.4 }),
-    );
-    transformer.position.set(0.32, 7.6, 0);
-    g.add(transformer);
-
-    const lampX = x < 0 ? 0.9 : -0.9;
-    const lamp = new THREE.Mesh(
-      new THREE.BoxGeometry(0.55, 0.16, 0.28),
-      new THREE.MeshBasicMaterial({ color: 0xffd78e }),
-    );
-    lamp.position.set(lampX, 7.2, 0);
-    g.add(lamp);
-    addGlowHalo(x + lampX, 7.1, z, 0xffbe66, 3.8, 3.8, 0.58);
-    scene.add(g);
-    return new THREE.Vector3(x, 8.6, z);
+    const sideSign: 1 | -1 = x < 0 ? 1 : -1;
+    const built = buildSculptedCobraStreetlamp(sideSign, assets.darkMetalMat);
+    built.group.position.set(x, 0.18, z);
+    scene.add(built.group);
+    registerNightEmissive(built.lensMat, 2.2, 0.15);
+    addGlowHalo(x + built.lampLocalX, 7.25, z, 0xffbe66, 3.6, 3.6, 0.56);
+    return new THREE.Vector3(x, 8.68, z);
   };
 
   const p1 = addUtilityPole(-13.8, 3.1);
@@ -1177,18 +1339,31 @@ export function buildMinatoWorld(
     built.group.rotation.y = rotY;
     parent.add(built.group);
     if (built.sirenSprites) sirenSprites.push(built.sirenSprites);
+
+    const len = built.bounds.hx * 2;
+    const wid = built.bounds.hz * 2;
+    const hx = (Math.abs(Math.cos(rotY)) * len + Math.abs(Math.sin(rotY)) * wid) / 2;
+    const hz = (Math.abs(Math.sin(rotY)) * len + Math.abs(Math.cos(rotY)) * wid) / 2;
+
     vehicles.push({
       kind,
+      group: built.group,
       proxyGroup: built.proxyGroup,
       customSlotMount: built.customSlotMount,
       glbInstance: null,
+      destructible: addCollider && kind !== 'van' && elevY <= 0.25,
+      x: cx,
+      z: cz,
+      elevY,
+      hx,
+      hz,
+      hp: 110,
+      maxHp: 110,
+      destroyed: false,
+      setCharred: built.setCharred,
     });
 
     if (addCollider) {
-      const len = built.bounds.hx * 2;
-      const wid = built.bounds.hz * 2;
-      const hx = (Math.abs(Math.cos(rotY)) * len + Math.abs(Math.sin(rotY)) * wid) / 2;
-      const hz = (Math.abs(Math.sin(rotY)) * len + Math.abs(Math.cos(rotY)) * wid) / 2;
       colliders.push({ x1: cx - hx, z1: cz - hz, x2: cx + hx, z2: cz + hz, tall: false });
     }
   };
@@ -1197,8 +1372,8 @@ export function buildMinatoWorld(
   placeCar('coupe', 4.6, 11.4, -2.65);
   placeCar('taxi', -22.2, 10.6, 0.16);
   placeCar('van', 13.2, 3.8, 1.72);
-  // Ground-floor B1 parked sedan inside east bay (matching Concept Art Sheet 1 B1 strip!)
-  placeCar('sedan', 26.5, 7.4, Math.PI, 0.18, true);
+  // Sunken B1 parked sedan inside east bay (seated flush at -1.25m!)
+  placeCar('sedan', 26.5, 7.4, Math.PI, B1_PIT.depth, true);
   // 2nd Floor Parking Cars (attached to parkingUpperGroup so they hide cleanly during B1 interior cutaway!)
   placeCar('sedan', 22.8, 4.8, 0.0, 4.58, false, parkingUpperGroup);
   placeCar('coupe', 22.8, -1.6, Math.PI, 4.58, false, parkingUpperGroup);
@@ -1244,16 +1419,16 @@ export function buildMinatoWorld(
   ];
   for (const [px, pz, pw, pd, tint, rot] of puddleSpecs) {
     const pMat = new THREE.MeshPhysicalMaterial({
-      color: 0x090f22,
+      color: 0x0b1224,
       emissive: tint,
-      emissiveIntensity: 0.2,
-      roughness: 0.24,
-      metalness: 0.32,
-      clearcoat: 0.52,
-      clearcoatRoughness: 0.24,
+      emissiveIntensity: 0.18,
+      roughness: 0.42,
+      metalness: 0.24,
+      clearcoat: 0.18,
+      clearcoatRoughness: 0.36,
       alphaMap: textures.puddleMask,
       transparent: true,
-      opacity: 0.36,
+      opacity: 0.28,
       depthWrite: false,
       polygonOffset: true,
       polygonOffsetFactor: -1,
@@ -1264,6 +1439,7 @@ export function buildMinatoWorld(
     puddle.scale.set(pw, 1, pd);
     puddle.rotation.y = rot;
     scene.add(puddle);
+    nightOnlyVisuals.push(puddle);
   }
 
   // 4 Cast-Iron Street Manhole Grates + Rising Volumetric Steam Vent Coordinates
@@ -1320,40 +1496,86 @@ export function buildMinatoWorld(
     scene.add(bar);
   });
 
-  // Mood Switcher (Matches Concept Art Sheet 3: Night Outbreak / City Pop Sunset / Deep Harbor Mist)
+  nightOnlyVisuals.push(floodCone, lighthouseBeam, moon);
+
+  // Stage-Gate v2 Dual-Lighting Mood Controller:
+  // - 'night': Restrained Noir Night (lifted neutral slate shadows, warm amber practicals, zero monochrome violet crush)
+  // - 'day': Neutral Daylight (mandatory honest asset inspection lighting — clear sky, warm sun, dimmed night emissives)
+  // - 'sunset': Warm City Pop Sunset
+  // - 'mist': Harbor Mist
   const applyMood = (mood: LightingMood) => {
-    if (mood === 'night') {
-      scene.background = new THREE.Color(0x101830);
-      fog.color.setHex(0x161f3d);
-      fog.density = 0.0124;
-      hemiLight.color.setHex(0x6e8ad8);
-      hemiLight.groundColor.setHex(0x362448);
-      hemiLight.intensity = 1.18;
-      moonLight.color.setHex(0xaac8ff);
-      moonLight.intensity = 1.28;
-      streetFill.color.setHex(0xffb478);
-      streetFill.intensity = 0.46;
+    const isDay = mood === 'day';
+
+    // Toggle night-only additive glow halos, wet neon puddles, beams, headlight cones, and moon cleanly
+    for (const v of nightOnlyVisuals) {
+      v.visible = !isDay;
+    }
+    assets.hlConeMat.opacity = isDay ? 0.0 : 0.14;
+    for (const entry of nightEmissives) {
+      entry.mat.emissiveIntensity = isDay ? entry.day : entry.night;
+    }
+
+    // Calibrate street asphalt, concrete, sidewalk & skyline albedo so Neutral Daylight reads like real sunlit concrete
+    asphaltMat.color.setHex(isDay ? 0xbec4cc : 0x7e88a6);
+    asphaltMat.roughness = isDay ? 0.94 : 0.88;
+    swMat.color.setHex(isDay ? 0xe6e8ec : 0xd0d6e4);
+    concreteMat.color.setHex(isDay ? 0x9e9a92 : 0x4e5674);
+    roofMat.color.setHex(isDay ? 0x5c6068 : 0x222844);
+    b1FloorMat.color.setHex(isDay ? 0x8d919a : 0x3b4358);
+    overlookDeckMat.color.setHex(isDay ? 0x868a92 : 0x343c4e);
+    overlookParapetMat.color.setHex(isDay ? 0x999da6 : 0x414a5e);
+    skylineMat.color.setHex(isDay ? 0x6e8096 : 0x161c36);
+    paintMat.opacity = isDay ? 0.62 : 0.28;
+
+    // Scale local nocturnal point lights down in neutral daylight so sun shadows dominate honestly
+    cityPopLight.intensity = isDay ? 0.0 : 2.6;
+    cafeLight.intensity = isDay ? 0.15 : 2.2;
+    arcadeMistLight.intensity = isDay ? 0.25 : 2.9;
+    parkCyanLight.intensity = isDay ? 0.85 : 2.6;
+
+    if (mood === 'day') {
+      scene.background = new THREE.Color(0xacc8e2);
+      fog.color.setHex(0xc4d8ea);
+      fog.density = 0.0022;
+      hemiLight.color.setHex(0xd4e8fa);
+      hemiLight.groundColor.setHex(0x7c746a);
+      hemiLight.intensity = 1.52;
+      moonLight.color.setHex(0xfff6e4);
+      moonLight.intensity = 2.55;
+      streetFill.color.setHex(0xdce8f4);
+      streetFill.intensity = 0.72;
+    } else if (mood === 'night') {
+      scene.background = new THREE.Color(0x111722);
+      fog.color.setHex(0x161e2c);
+      fog.density = 0.0082;
+      hemiLight.color.setHex(0x7b92b8);
+      hemiLight.groundColor.setHex(0x2f3440);
+      hemiLight.intensity = 1.12;
+      moonLight.color.setHex(0xc4d4e8);
+      moonLight.intensity = 1.32;
+      streetFill.color.setHex(0xffb874);
+      streetFill.intensity = 0.62;
     } else if (mood === 'sunset') {
-      scene.background = new THREE.Color(0x321f48);
-      fog.color.setHex(0x402856);
-      fog.density = 0.0108;
-      hemiLight.color.setHex(0xffa48c);
-      hemiLight.groundColor.setHex(0x3a244e);
-      hemiLight.intensity = 1.22;
-      moonLight.color.setHex(0xffb87a);
-      moonLight.intensity = 1.42;
-      streetFill.color.setHex(0xff8ca8);
-      streetFill.intensity = 0.5;
+      scene.background = new THREE.Color(0x362442);
+      fog.color.setHex(0x462d50);
+      fog.density = 0.0088;
+      hemiLight.color.setHex(0xffaa8c);
+      hemiLight.groundColor.setHex(0x3a2a42);
+      hemiLight.intensity = 1.2;
+      moonLight.color.setHex(0xffbc7a);
+      moonLight.intensity = 1.48;
+      streetFill.color.setHex(0xff92a4);
+      streetFill.intensity = 0.48;
     } else {
-      scene.background = new THREE.Color(0x0d2030);
-      fog.color.setHex(0x142e42);
-      fog.density = 0.019;
-      hemiLight.color.setHex(0x5ec8da);
-      hemiLight.groundColor.setHex(0x182636);
-      hemiLight.intensity = 1.05;
-      moonLight.color.setHex(0x88e0f0);
-      moonLight.intensity = 1.12;
-      streetFill.color.setHex(0x7ad8e8);
+      scene.background = new THREE.Color(0x122230);
+      fog.color.setHex(0x1a3242);
+      fog.density = 0.0145;
+      hemiLight.color.setHex(0x6cc2d4);
+      hemiLight.groundColor.setHex(0x222e38);
+      hemiLight.intensity = 1.08;
+      moonLight.color.setHex(0x98dce8);
+      moonLight.intensity = 1.18;
+      streetFill.color.setHex(0x8ad4e0);
       streetFill.intensity = 0.38;
     }
   };
@@ -1371,6 +1593,7 @@ export function buildMinatoWorld(
     steamVents,
     sirenSprites,
     vehicles,
+    shutters,
     b1Generator,
     parkCyanLight,
     floodHalo,

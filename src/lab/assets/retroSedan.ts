@@ -84,6 +84,7 @@ function createWheelAssembly(
   rubberMat: THREE.Material,
   alloyMat: THREE.Material,
   darkSteelMat: THREE.Material,
+  includeCreaseInk: boolean,
 ): THREE.Group {
   const wheel = new THREE.Group();
 
@@ -108,7 +109,12 @@ function createWheelAssembly(
   const tireGeo = splitCreaseNormals(rawTire, 34);
   rawTire.dispose();
   bakeVerticalGradientAO(tireGeo, 0.72, 1.04);
-  wheel.add(createStylizedMesh(tireGeo, rubberMat, { name: 'tire', creaseThresholdDeg: 38 }));
+  wheel.add(
+    createStylizedMesh(tireGeo, rubberMat, {
+      name: 'tire',
+      creaseThresholdDeg: includeCreaseInk ? 48 : 0,
+    }),
+  );
 
   // Deep-dish outer alloy rim barrel
   const rimPts = [
@@ -144,7 +150,7 @@ function createWheelAssembly(
 
   const mergedAlloy = mergeParts(spokeGeos);
   bakeVerticalGradientAO(mergedAlloy, 0.8, 1.08);
-  wheel.add(createStylizedMesh(mergedAlloy, alloyMat, { name: 'alloy_rim', creaseThresholdDeg: 32 }));
+  wheel.add(createStylizedMesh(mergedAlloy, alloyMat, { name: 'alloy_rim', creaseThresholdDeg: 0 }));
 
   // Inner brake disc & dark backing drum
   const brakeGeo = new THREE.CylinderGeometry(0.165, 0.165, 0.04, 14);
@@ -165,30 +171,39 @@ function createWheelAssembly(
  * Built via multi-station sculpted BufferGeometry hull loft, separate wedge greenhouse,
  * box fender flares, recessed grille/lamps/louvers, and deep-dish 5-spoke wheels.
  */
-export function buildRetroSedanAsset(): BuiltLabAsset {
+export interface RetroSedanVariantOptions {
+  bodyHex?: string;
+  stripeHex?: string;
+  includeCreaseInk?: boolean;
+  roofTaxiSign?: boolean;
+  seed?: number;
+}
+
+export function buildRetroSedanAsset(opts: RetroSedanVariantOptions = {}): BuiltLabAsset {
   const meta = ASSET_CATALOG.find((m) => m.id === 'sedan')!;
   const root = new THREE.Group();
   root.name = 'Asset_RetroSedan';
 
+  const includeInk = opts.includeCreaseInk ?? true;
+  const seedBase = opts.seed ?? 111;
+  const bodyHex = opts.bodyHex ?? '#3c5e6c';
+  const stripeHex = opts.stripeHex ?? '#c88338';
+
   // Curated DRG/TF2/Borderlands non-plastic material palette
   const bodyPaintMat = createPaintedMetalMaterial({
-    baseHex: '#3c5e6c',
-    lightHex: '#567f8e',
-    darkHex: '#253c47',
+    baseHex: bodyHex,
     wearHex: '#cfc6b4',
     roughness: 0.56,
     metalness: 0.32,
-    seed: 111,
+    seed: seedBase,
   });
 
   const accentStripeMat = createPaintedMetalMaterial({
-    baseHex: '#c88338',
-    lightHex: '#e0a256',
-    darkHex: '#8d531e',
+    baseHex: stripeHex,
     roughness: 0.62,
     metalness: 0.18,
     panelGrid: false,
-    seed: 112,
+    seed: seedBase + 1,
   });
 
   const darkTrimMat = createPaintedMetalMaterial({
@@ -198,7 +213,7 @@ export function buildRetroSedanAsset(): BuiltLabAsset {
     roughness: 0.78,
     metalness: 0.22,
     panelGrid: false,
-    seed: 113,
+    seed: seedBase + 2,
   });
 
   const alloyMat = createPaintedMetalMaterial({
@@ -381,7 +396,12 @@ export function buildRetroSedanAsset(): BuiltLabAsset {
 
   const mergedBody = mergeParts(bodyGeos);
   bakeVerticalGradientAO(mergedBody, 0.72, 1.06, 0.22, 1.40);
-  root.add(createStylizedMesh(mergedBody, bodyPaintMat, { name: 'sedan_body', creaseThresholdDeg: 42 }));
+  root.add(
+    createStylizedMesh(mergedBody, bodyPaintMat, {
+      name: 'sedan_body',
+      creaseThresholdDeg: includeInk ? 46 : 0,
+    }),
+  );
 
   // ---------------------------------------------------------------------------
   // 2. RETRO OCHRE SIDE BELTLINE ACCENT STRIPE
@@ -401,7 +421,10 @@ export function buildRetroSedanAsset(): BuiltLabAsset {
   const mergedStripe = mergeParts(stripeGeos);
   bakeVerticalGradientAO(mergedStripe, 0.85, 1.05);
   root.add(
-    createStylizedMesh(mergedStripe, accentStripeMat, { name: 'accent_stripe', creaseThresholdDeg: 35 }),
+    createStylizedMesh(mergedStripe, accentStripeMat, {
+      name: 'accent_stripe',
+      creaseThresholdDeg: includeInk ? 44 : 0,
+    }),
   );
 
   // ---------------------------------------------------------------------------
@@ -443,7 +466,12 @@ export function buildRetroSedanAsset(): BuiltLabAsset {
   });
   mergedGlass.rotateX(-Math.PI * 0.5);
   bakeVerticalGradientAO(mergedGlass, 0.74, 1.14, 0.84, 1.34);
-  root.add(createStylizedMesh(mergedGlass, smokedGlassMat, { name: 'smoked_glass', creaseThresholdDeg: 44 }));
+  root.add(
+    createStylizedMesh(mergedGlass, smokedGlassMat, {
+      name: 'smoked_glass',
+      creaseThresholdDeg: includeInk ? 48 : 0,
+    }),
+  );
 
   // ---------------------------------------------------------------------------
   // 4. DARK URETHANE BUMPERS, RECESSED GRILLE, LOUVERS, WHEEL WELLS, TRIM
@@ -536,7 +564,12 @@ export function buildRetroSedanAsset(): BuiltLabAsset {
 
   const mergedTrim = mergeParts(trimGeos);
   bakeVerticalGradientAO(mergedTrim, 0.64, 1.0);
-  root.add(createStylizedMesh(mergedTrim, darkTrimMat, { name: 'dark_trim', creaseThresholdDeg: 32 }));
+  root.add(
+    createStylizedMesh(mergedTrim, darkTrimMat, {
+      name: 'dark_trim',
+      creaseThresholdDeg: 0,
+    }),
+  );
 
   // ---------------------------------------------------------------------------
   // 5. QUAD RECESSED HEADLAMPS, AMBER MARKERS, FULL-WIDTH TAIL LIGHT BAR & EXHAUSTS
@@ -552,7 +585,7 @@ export function buildRetroSedanAsset(): BuiltLabAsset {
   root.add(
     createStylizedMesh(mergeParts(headGeos), headlampMat, {
       name: 'quad_headlamps',
-      creaseThresholdDeg: 38,
+      creaseThresholdDeg: 0,
     }),
   );
 
@@ -569,7 +602,7 @@ export function buildRetroSedanAsset(): BuiltLabAsset {
   root.add(
     createStylizedMesh(mergeParts(amberGeos), amberLampMat, {
       name: 'amber_markers',
-      creaseThresholdDeg: 38,
+      creaseThresholdDeg: 0,
     }),
   );
 
@@ -585,9 +618,27 @@ export function buildRetroSedanAsset(): BuiltLabAsset {
   root.add(
     createStylizedMesh(mergeParts(tailGeos), tailLampMat, {
       name: 'tail_lights',
-      creaseThresholdDeg: 38,
+      creaseThresholdDeg: 0,
     }),
   );
+
+  // Optional glowing 1980s Japanese rooftop taxi lantern
+  if (opts.roofTaxiSign) {
+    const lanternMat = new THREE.MeshStandardMaterial({
+      color: 0xf6c95e,
+      emissive: 0xf4a836,
+      emissiveIntensity: 0.95,
+      roughness: 0.35,
+    });
+    const taxiSign = createChamferedPrism(0.46, 0.16, 0.22, 0.025, { topTaperX: 0.82, topTaperZ: 0.82 });
+    taxiSign.translate(0, 1.46, -0.18);
+    root.add(
+      createStylizedMesh(taxiSign, lanternMat, {
+        name: 'taxi_roof_sign',
+        creaseThresholdDeg: 0,
+      }),
+    );
+  }
 
   // Twin chamfered metallic exhaust pipes
   const exhaustGeos: THREE.BufferGeometry[] = [];
@@ -600,7 +651,7 @@ export function buildRetroSedanAsset(): BuiltLabAsset {
   }
   const mergedExhaust = mergeParts(exhaustGeos);
   bakeVerticalGradientAO(mergedExhaust, 0.72, 1.04);
-  root.add(createStylizedMesh(mergedExhaust, alloyMat, { name: 'twin_exhaust', creaseThresholdDeg: 36 }));
+  root.add(createStylizedMesh(mergedExhaust, alloyMat, { name: 'twin_exhaust', creaseThresholdDeg: 0 }));
 
   // ---------------------------------------------------------------------------
   // 6. 4 SCULPTED DEEP-DISH WHEELS
@@ -612,7 +663,7 @@ export function buildRetroSedanAsset(): BuiltLabAsset {
     [-0.84, -1.34, -1],
   ];
   wheelCoords.forEach(([wx, wz, side], idx) => {
-    const w = createWheelAssembly(side, rubberMat, alloyMat, darkTrimMat);
+    const w = createWheelAssembly(side, rubberMat, alloyMat, darkTrimMat, includeInk);
     w.name = `wheel_${idx + 1}`;
     w.position.set(wx, 0.34, wz);
     root.add(w);

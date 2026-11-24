@@ -11,7 +11,7 @@ const INITIAL_HUD: HudSnapshot = {
   state: 'title',
   phase: 1,
   totalPhases: 3,
-  zoneName: 'ПЕРЕКРЁСТОК А-3 // «Café / 喫茶»',
+  zoneName: 'ПЕРЕКРЁСТОК А-3 · «Café / 喫茶»',
   objective: 'Зачистите перекрёсток от заражённых, выходящих из галереи «中央商店街».',
   enemiesAlive: 0,
   kills: 0,
@@ -29,6 +29,9 @@ const INITIAL_HUD: HudSnapshot = {
   bossActive: false,
   bossHpPercent: 0,
   lowHpWarning: false,
+  spreadRatio: 0.68,
+  interactPrompt: null,
+  shutters: [],
   activeReload: {
     reloading: false,
     progress: 0,
@@ -38,6 +41,8 @@ const INITIAL_HUD: HudSnapshot = {
     overchargeLeft: 0,
     magAmmo: 28,
     magMax: 28,
+    reserveAmmo: 140,
+    reserveMax: 140,
   },
   generator: {
     active: false,
@@ -52,6 +57,7 @@ const INITIAL_HUD: HudSnapshot = {
     squad: [],
     enemies: [],
     pickups: [],
+    shutters: [],
     holdPoint: null,
     generatorU: 0.9,
     generatorV: 0.54,
@@ -126,8 +132,12 @@ function MinatoGameView({ onOpenAssetLab }: { onOpenAssetLab: () => void }) {
     });
     engineRef.current = engine;
 
-    // Support ?autostart=1 (& optional ?zone=shop|courtyard|b1|arcade) for instant entry into gameplay
+    // Support ?mood=day|night|sunset|mist and ?autostart=1 (& optional ?zone=shop|courtyard|b1|arcade)
     const params = new URLSearchParams(window.location.search);
+    const rawMood = params.get('mood');
+    if (rawMood === 'day' || rawMood === 'night' || rawMood === 'sunset' || rawMood === 'mist') {
+      engine.setMood(rawMood, true);
+    }
     if (params.get('autostart') === '1') {
       const rawZone = params.get('zone');
       const spawnZone =
@@ -177,6 +187,8 @@ function MinatoGameView({ onOpenAssetLab }: { onOpenAssetLab: () => void }) {
           onToggleMusic={() => engineRef.current?.toggleMusic()}
           onToggleMute={() => engineRef.current?.toggleMute()}
           onTogglePause={() => engineRef.current?.togglePause()}
+          onInteract={() => engineRef.current?.triggerInteract()}
+          onReviveHoldChange={(held) => engineRef.current?.setReviveButtonHeld(held)}
         />
       )}
 

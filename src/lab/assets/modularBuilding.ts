@@ -501,7 +501,7 @@ export function buildModularBuildingAsset(): BuiltLabAsset {
   root.add(
     createStylizedMesh(mergedConcrete, concreteMat, {
       name: 'concrete_structure',
-      creaseThresholdDeg: 32,
+      creaseThresholdDeg: 46,
     }),
   );
 
@@ -510,7 +510,7 @@ export function buildModularBuildingAsset(): BuiltLabAsset {
   root.add(
     createStylizedMesh(mergedTile, facadeTileMat, {
       name: 'masonry_facade',
-      creaseThresholdDeg: 32,
+      creaseThresholdDeg: 48,
     }),
   );
 
@@ -519,7 +519,7 @@ export function buildModularBuildingAsset(): BuiltLabAsset {
   root.add(
     createStylizedMesh(mergedSteel, darkSteelMat, {
       name: 'steel_frames_and_railings',
-      creaseThresholdDeg: 34,
+      creaseThresholdDeg: 0,
     }),
   );
 
@@ -528,7 +528,7 @@ export function buildModularBuildingAsset(): BuiltLabAsset {
   root.add(
     createStylizedMesh(mergedUtility, utilityMetalMat, {
       name: 'hvac_and_water_tank',
-      creaseThresholdDeg: 34,
+      creaseThresholdDeg: 46,
     }),
   );
 
@@ -537,7 +537,7 @@ export function buildModularBuildingAsset(): BuiltLabAsset {
   root.add(
     createStylizedMesh(mergedAwningRed, awningRedMat, {
       name: 'awning_red',
-      creaseThresholdDeg: 34,
+      creaseThresholdDeg: 48,
     }),
   );
 
@@ -546,7 +546,7 @@ export function buildModularBuildingAsset(): BuiltLabAsset {
   root.add(
     createStylizedMesh(mergedAwningCream, awningCreamMat, {
       name: 'awning_cream',
-      creaseThresholdDeg: 34,
+      creaseThresholdDeg: 48,
     }),
   );
 

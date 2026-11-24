@@ -1,6 +1,6 @@
 export type GamePhaseState = 'title' | 'playing' | 'paused' | 'victory' | 'defeat';
 
-export type LightingMood = 'night' | 'sunset' | 'mist';
+export type LightingMood = 'night' | 'day' | 'sunset' | 'mist';
 
 export type SquadRole = 'leader' | 'medic' | 'heavy' | 'sniper';
 
@@ -30,12 +30,15 @@ export interface UnitHudState {
   id: number;
   name: string;
   role: SquadRole;
+  weaponRoleLabel: string;
   color: string;
   hp: number;
   maxHp: number;
   ghostHp: number;
   magAmmo: number;
   magMax: number;
+  reserveAmmo: number;
+  reserveMax: number;
   reloading: boolean;
   overcharged: boolean;
   skillName: string;
@@ -43,6 +46,9 @@ export interface UnitHudState {
   skillCd: number;
   skillMaxCd: number;
   down: boolean;
+  bleedoutTimer: number;
+  bleedoutMax: number;
+  reviveProgress: number;
   active: boolean;
 }
 
@@ -55,6 +61,30 @@ export interface ActiveReloadHudState {
   overchargeLeft: number;
   magAmmo: number;
   magMax: number;
+  reserveAmmo: number;
+  reserveMax: number;
+}
+
+export type ShutterStatus = 'open' | 'sealed' | 'cooldown';
+
+export interface ShutterHudState {
+  id: string;
+  label: string;
+  status: ShutterStatus;
+  timer: number;
+  hpRatio: number;
+  u: number;
+  v: number;
+}
+
+export interface InteractPromptHudState {
+  key: 'E';
+  kind: 'shutter' | 'revive';
+  targetId: string;
+  label: string;
+  sublabel: string;
+  progress: number;
+  accent: string;
 }
 
 export interface RunSummary {
@@ -90,6 +120,7 @@ export interface MinimapSnapshot {
   squad: MinimapDot[];
   enemies: MinimapDot[];
   pickups: Array<{ u: number; v: number; kind: 'medkit' | 'supply' | 'vinyl' | 'ammo' }>;
+  shutters: ShutterHudState[];
   holdPoint: { u: number; v: number } | null;
   generatorU: number;
   generatorV: number;
@@ -137,6 +168,9 @@ export interface HudSnapshot {
   bossActive: boolean;
   bossHpPercent: number;
   lowHpWarning: boolean;
+  spreadRatio: number;
+  interactPrompt: InteractPromptHudState | null;
+  shutters: ShutterHudState[];
   activeReload: ActiveReloadHudState;
   generator: GeneratorHudState;
   minimap: MinimapSnapshot;

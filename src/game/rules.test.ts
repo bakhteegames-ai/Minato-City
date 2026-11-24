@@ -142,9 +142,11 @@ test('neon flicker stays within safe non-strobing bounds and mood post-process c
     assert.ok(pulse >= 0.78 && pulse <= 1.12);
   }
   const night = getMoodPostProcessConfig('night');
+  const day = getMoodPostProcessConfig('day');
   const sunset = getMoodPostProcessConfig('sunset');
   const mist = getMoodPostProcessConfig('mist');
-  assert.ok(night.bloomThreshold >= 1.05 && night.bloomStrength > 0.2 && night.bloomStrength <= 0.5);
+  assert.equal(day.bloomStrength, 0);
+  assert.ok(night.bloomThreshold >= 1.35 && night.bloomStrength >= 0.08 && night.bloomStrength <= 0.25);
   assert.ok(sunset.highlightTint[0] > mist.highlightTint[0]);
   assert.ok(mist.highlightTint[2] > sunset.highlightTint[2]);
 });
@@ -250,6 +252,100 @@ test('Option 2+3 GLB normalization, animation clip matching, and engine level bl
   assert.equal(bp.assetSlots.length, 13);
   assert.ok(bp.waves.phase3.some((w) => w.type === 'tank'));
 });
+
+import {
+  B1_PIT,
+  computeDirectionalArmorDamage,
+  computeWeaponSpread,
+  consumeReserveForReload,
+  DOWNED_BLEEDOUT_SEC,
+  getTerrainHeightAt,
+  OVERLOOK_DECK,
+  REVIVE_DURATION_SEC,
+  SHUTTER_COOLDOWN_SEC,
+  SHUTTER_DURATION_SEC,
+  SHUTTER_MAX_HP,
+  SHUTTER_SPECS,
+  updateDownedUnit,
+  updateShutterState,
+} from './rules';
+
+test('multi-level terrain elevation returns Overlook high ground, B1 sunken pit, ramps, and street baseline', () => {
+  assert.equal(getTerrainHeightAt(0, 10), 0);
+  assert.equal(getTerrainHeightAt(0, 17.5), OVERLOOK_DECK.height);
+  const midWestRamp = getTerrainHeightAt((OVERLOOK_DECK.westRampX1 + OVERLOOK_DECK.deckX1) * 0.5, 17.5);
+  assert.ok(midWestRamp > 0.6 && midWestRamp < 0.9, `unexpected west ramp height ${midWestRamp}`);
+  assert.equal(getTerrainHeightAt(25.4, -1.5), B1_PIT.depth);
+  const midB1Ramp = getTerrainHeightAt((B1_PIT.rampX1 + B1_PIT.rampX2) * 0.5, 2.0);
+  assert.ok(midB1Ramp < -0.5 && midB1Ramp > -0.75, `unexpected B1 ramp height ${midB1Ramp}`);
+  assert.ok(getTerrainHeightAt(-5, 2.6) > 0.1);
+});
+
+test('security shutter state machine seals on [E], breaches on damage, and resets after cooldown', () => {
+  assert.equal(SHUTTER_SPECS.length, 2);
+  let state = { status: 'open' as const, timer: 0, hp: SHUTTER_MAX_HP, maxHp: SHUTTER_MAX_HP };
+  const sealed = updateShutterState(state, 0.016, true, 0);
+  assert.equal(sealed.justSealed, true);
+  assert.equal(sealed.state.status, 'sealed');
+  assert.equal(sealed.state.timer, SHUTTER_DURATION_SEC);
+
+  const damaged = updateShutterState(sealed.state, 1.0, false, 60);
+  assert.equal(damaged.state.status, 'sealed');
+  assert.equal(damaged.state.hp, SHUTTER_MAX_HP - 60);
+
+  const breached = updateShutterState(damaged.state, 0.2, false, 150);
+  assert.equal(breached.justBreached, true);
+  assert.equal(breached.state.status, 'cooldown');
+  assert.equal(breached.state.timer, SHUTTER_COOLDOWN_SEC);
+
+  const ready = updateShutterState(breached.state, SHUTTER_COOLDOWN_SEC + 0.5, false, 0);
+  assert.equal(ready.justReady, true);
+  assert.equal(ready.state.status, 'open');
+  assert.equal(ready.state.hp, SHUTTER_MAX_HP);
+});
+
+test('directional flank armor rewards rear/flank shots and mitigates frontal hits', () => {
+  // Enemy faces +Z (yaw = 0). Shot coming from +Z heading -Z hits their front chest -> deflect
+  const front = computeDirectionalArmorDamage(50, true, false, 0, -1, 0);
+  assert.equal(front.hitKind, 'armor_deflect');
+  assert.equal(front.damage, 19);
+
+  // Shot coming from -Z heading +Z hits their back -> flank crit!
+  const back = computeDirectionalArmorDamage(50, true, false, 0, 1, 0);
+  assert.equal(back.hitKind, 'flank_crit');
+  assert.equal(back.damage, 65);
+
+  // Armor-piercing ignores frontal armor
+  const ap = computeDirectionalArmorDamage(50, true, true, 0, -1, 0);
+  assert.equal(ap.hitKind, 'ap_pierce');
+  assert.equal(ap.damage, 50);
+});
+
+test('weapon spread tightens when stationary, reserve ammo decrements on reload, and downed ally revives or bleeds out', () => {
+  const still = computeWeaponSpread(0.06, false, false);
+  const cover = computeWeaponSpread(0.06, false, true);
+  const moving = computeWeaponSpread(0.06, true, false);
+  assert.ok(cover < still && still < moving);
+
+  const fullReload = consumeReserveForReload(8, 28, 100);
+  assert.deepEqual(fullReload, { newMag: 28, newReserve: 80, loaded: 20 });
+  const partialReload = consumeReserveForReload(4, 28, 10);
+  assert.deepEqual(partialReload, { newMag: 14, newReserve: 0, loaded: 10 });
+
+  // Revive pauses bleedout and finishes at REVIVE_DURATION_SEC
+  const halfRevive = updateDownedUnit(DOWNED_BLEEDOUT_SEC, 0, true, true, 1.0, REVIVE_DURATION_SEC * 0.5);
+  assert.equal(halfRevive.bleedoutTimer, DOWNED_BLEEDOUT_SEC);
+  assert.ok(halfRevive.reviveProgress >= 0.49 && !halfRevive.revivedNow);
+
+  const doneRevive = updateDownedUnit(DOWNED_BLEEDOUT_SEC, halfRevive.reviveProgress, true, true, 1.5, REVIVE_DURATION_SEC * 0.5);
+  assert.equal(doneRevive.revivedNow, true);
+
+  // Unattended bleedout reaches 0 and triggers bledOutNow
+  const bled = updateDownedUnit(1.0, 0.2, false, false, 1.0, 1.5);
+  assert.equal(bled.bledOutNow, true);
+  assert.equal(bled.bleedoutTimer, 0);
+});
+
 
 
 

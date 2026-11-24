@@ -42,29 +42,40 @@ import {
   canExtract,
   clampDelta,
   computeBarrelExplosionDamage,
-  computeDamage,
+  computeDirectionalArmorDamage,
   computeGrenadeFalloffDamage,
   computeMusicIntensity,
   computeNeonFlickerIntensity,
   computePriorityWaypoint,
   computeRunGrade,
   computeSpatialPan,
+  computeWeaponSpread,
+  consumeReserveForReload,
   cycleSquadStance,
+  DOWNED_BLEEDOUT_SEC,
   ENEMY_ARCHETYPES,
   evaluateActiveReload,
   EVAC_ZONE,
   getMoodPostProcessConfig,
   getPhaseObjective,
   getStanceMeta,
+  getTerrainHeightAt,
   getWaveSpawns,
   getZoneName,
   hasLineOfSight,
   isPointInsideTallWall,
   MAX_FLARE_AMMO,
   resolveCircleBox,
+  REVIVE_INTERACT_RADIUS,
   selectPriorityTarget,
+  SHUTTER_INTERACT_RADIUS,
+  SHUTTER_MAX_HP,
+  SHUTTER_SPECS,
+  updateDownedUnit,
   updateGeneratorCharge,
+  updateShutterState,
   worldToMinimap,
+  type ShutterRuntimeState,
   type TargetCandidate,
 } from './rules';
 import { createMinatoTextureBank, type MinatoTextureBank } from './textures';
@@ -73,6 +84,7 @@ import type {
   EnemyType,
   GamePhaseState,
   HudSnapshot,
+  InteractPromptHudState,
   LightingMood,
   MusicIntensity,
   RunSummary,
@@ -80,12 +92,13 @@ import type {
   SquadStance,
   ToastMessage,
 } from './types';
-import { buildMinatoWorld, type MinatoWorldRefs } from './worldBuilder';
+import { buildMinatoWorld, type MinatoWorldRefs, type VehicleSlotInstance } from './worldBuilder';
 
 interface SquadMember {
   id: number;
   name: string;
   role: SquadRole;
+  weaponRoleLabel: string;
   color: string;
   hex: number;
   jacket: number;
@@ -101,6 +114,11 @@ interface SquadMember {
   fireCd: number;
   magAmmo: number;
   magMax: number;
+  reserveAmmo: number;
+  reserveMax: number;
+  pelletCount: number;
+  armorPiercing: boolean;
+  knockback: number;
   reloadTime: number;
   reloadElapsed: number;
   reloading: boolean;
@@ -115,6 +133,11 @@ interface SquadMember {
   skillCd: number;
   skillMaxCd: number;
   down: boolean;
+  bledOut: boolean;
+  bleedoutTimer: number;
+  reviveProgress: number;
+  isMoving: boolean;
+  emptyClickCd: number;
   rollTimer: number;
   rollCd: number;
   rollVx: number;
@@ -148,6 +171,9 @@ interface EnemyEntity {
   windupMax: number;
   windupTargetX: number;
   windupTargetZ: number;
+  staggerTimer: number;
+  knockVx: number;
+  knockVz: number;
   steerDir: number;
   steerTimer: number;
   flankPhase: number;
@@ -175,6 +201,7 @@ interface Projectile {
   t: number;
   dur: number;
   dmg: number;
+  knockback: number;
   life: number;
   pierce: boolean;
   mesh: THREE.Mesh;
@@ -219,7 +246,8 @@ interface AcidPoolItem {
 interface PickupItem {
   x: number;
   z: number;
-  kind: 'medkit' | 'supply' | 'vinyl';
+  baseY: number;
+  kind: 'medkit' | 'supply' | 'vinyl' | 'ammo';
   label: string;
   taken: boolean;
   mesh: THREE.Mesh;
@@ -460,6 +488,40 @@ function buildNocturnalCityPopEnvironment(): THREE.Scene {
   return envScene;
 }
 
+/** Neutral coastal daylight PMREM environment for honest asset inspection ('day' mode). */
+function buildDaylightStudioEnvironment(): THREE.Scene {
+  const envScene = new THREE.Scene();
+  envScene.background = new THREE.Color(0x9ab4cc);
+
+  const shellGeo = new THREE.BoxGeometry(24, 14, 24);
+  const shellMat = new THREE.MeshBasicMaterial({ color: 0xb6cadc, side: THREE.BackSide });
+  envScene.add(new THREE.Mesh(shellGeo, shellMat));
+
+  const sky = new THREE.Mesh(
+    new THREE.PlaneGeometry(20, 20),
+    new THREE.MeshBasicMaterial({ color: 0xe6f0fa, side: THREE.DoubleSide }),
+  );
+  sky.position.set(0, 6.8, 0);
+  sky.rotation.x = Math.PI / 2;
+  envScene.add(sky);
+
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(20, 20),
+    new THREE.MeshBasicMaterial({ color: 0x7a756c, side: THREE.DoubleSide }),
+  );
+  ground.position.set(0, -6.8, 0);
+  ground.rotation.x = -Math.PI / 2;
+  envScene.add(ground);
+
+  const sunCard = new THREE.Mesh(
+    new THREE.BoxGeometry(6, 4, 0.3),
+    new THREE.MeshBasicMaterial({ color: 0xfff6e0 }),
+  );
+  sunCard.position.set(6, 4.5, -11.2);
+  envScene.add(sunCard);
+  return envScene;
+}
+
 function detectSoftwareGl(): boolean {
   try {
     const canvas = document.createElement('canvas');
@@ -508,7 +570,10 @@ export class MinatoEngine {
   private medLight: THREE.PointLight;
 
   // Weather & pooled FX
+  private nightEnvMap: THREE.Texture;
+  private dayEnvMap: THREE.Texture;
   private rainGeo: THREE.BufferGeometry;
+  private rainLines: THREE.LineSegments;
   private rainVel: Float32Array;
   private petals: Array<{ mesh: THREE.Mesh; vx: number; vy: number; vz: number }> = [];
   private steamPuffs: SteamPuffSlot[] = [];
@@ -569,6 +634,15 @@ export class MinatoEngine {
   private acidPools: AcidPoolItem[] = [];
   private pickups: PickupItem[] = [];
 
+  // Interactive Security Shutters & combat feel state
+  private shutterStates: ShutterRuntimeState[] = [];
+  private shutterColliderIndices: number[] = [];
+  private shutterVisualOpen: number[] = [];
+  private currentSpreadRatio = 0.68;
+  private recoilKickX = 0;
+  private recoilKickZ = 0;
+  private reviveButtonHeld = false;
+
   // Camera rig
   private camYaw = -0.16;
   private camPitch = 0.6;
@@ -580,10 +654,11 @@ export class MinatoEngine {
   // Unified input hub
   private keysHeld = new Set<string>();
   private rollBufferTimer = 0;
-  private mouseNDC = new THREE.Vector2(0, 0);
+  private mouseNDC = new THREE.Vector2(0.28, 0.04);
   private aimPoint = new THREE.Vector3(-4, 1.15, 8);
   private mouseDown = false;
   private dragOrbit = false;
+  private rightDragOrbit = false;
   private prevDragX = 0;
   private prevDragY = 0;
   private raycaster = new THREE.Raycaster();
@@ -594,6 +669,8 @@ export class MinatoEngine {
   private frameId = 0;
   private lastTime = performance.now();
   private hudPushAccum = 0;
+  private lastViewportW = 0;
+  private lastViewportH = 0;
   private resizeObserver: ResizeObserver;
 
   constructor(container: HTMLDivElement, callbacks: MinatoEngineCallbacks) {
@@ -612,10 +689,12 @@ export class MinatoEngine {
     this.renderer.toneMappingExposure = 1.04;
     this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
     const width = Math.max(1, container.clientWidth || window.innerWidth);
     const height = Math.max(1, container.clientHeight || window.innerHeight);
+    this.lastViewportW = width;
+    this.lastViewportH = height;
     this.renderer.setSize(width, height);
     this.renderer.domElement.style.display = 'block';
     this.renderer.domElement.style.width = '100%';
@@ -626,10 +705,11 @@ export class MinatoEngine {
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(40, width / height, 0.4, 240);
 
-    // Custom Nocturnal City Pop PMREM Environment (luminous indigo + neon bounce, zero white softbox washout!)
+    // Dual PMREM IBL Environments: Restrained Noir Night + Neutral Coastal Daylight
     const pmrem = new THREE.PMREMGenerator(this.renderer);
-    const envScene = buildNocturnalCityPopEnvironment();
-    this.scene.environment = pmrem.fromScene(envScene, 0.04).texture;
+    this.nightEnvMap = pmrem.fromScene(buildNocturnalCityPopEnvironment(), 0.04).texture;
+    this.dayEnvMap = pmrem.fromScene(buildDaylightStudioEnvironment(), 0.04).texture;
+    this.scene.environment = this.nightEnvMap;
     this.scene.environmentIntensity = 0.85;
     pmrem.dispose();
 
@@ -637,6 +717,13 @@ export class MinatoEngine {
     this.textures = createMinatoTextureBank(maxAniso);
     this.assets = createSharedModelAssets(this.textures);
     this.world = buildMinatoWorld(this.scene, this.textures, this.assets, this.isSoftwareGl);
+
+    // Reserve fixed dynamic collider slots for Security Shutters (before barrel colliders)
+    this.shutterColliderIndices = SHUTTER_SPECS.map(() => {
+      const idx = this.world.colliders.length;
+      this.world.colliders.push({ x1: -999, z1: -999, x2: -999, z2: -999, tall: true });
+      return idx;
+    });
 
     // Dynamic lights
     this.flashLight = new THREE.PointLight(0xffd285, 0, 16);
@@ -661,12 +748,11 @@ export class MinatoEngine {
     }
     this.rainGeo = new THREE.BufferGeometry();
     this.rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPos, 3));
-    this.scene.add(
-      new THREE.LineSegments(
-        this.rainGeo,
-        new THREE.LineBasicMaterial({ color: 0xa4c6ff, transparent: true, opacity: 0.22 }),
-      ),
+    this.rainLines = new THREE.LineSegments(
+      this.rainGeo,
+      new THREE.LineBasicMaterial({ color: 0xa4c6ff, transparent: true, opacity: 0.22 }),
     );
+    this.scene.add(this.rainLines);
 
     // Drifting Sakura Petals near courtyard
     const pGeo = new THREE.PlaneGeometry(0.18, 0.11);
@@ -932,10 +1018,28 @@ export class MinatoEngine {
     }
   }
 
+  private disposePostProcessing(): void {
+    this.bloomPass?.dispose();
+    this.outputPass?.dispose();
+    this.gradePass?.dispose();
+    this.normalDepthTarget?.depthTexture?.dispose();
+    this.normalDepthTarget?.dispose();
+    this.composer?.dispose();
+    this.composer = null;
+    this.bloomPass = null;
+    this.outputPass = null;
+    this.gradePass = null;
+    this.normalDepthTarget = null;
+  }
+
   private applyPostProcessMood(mood: LightingMood): void {
     const cfg = getMoodPostProcessConfig(mood);
-    this.renderer.toneMappingExposure = mood === 'sunset' ? 1.08 : mood === 'mist' ? 1.04 : 1.04;
-    this.scene.environmentIntensity = mood === 'sunset' ? 0.95 : mood === 'mist' ? 0.85 : 0.85;
+    this.scene.environment = mood === 'day' ? this.dayEnvMap : this.nightEnvMap;
+    this.rainLines.visible = mood !== 'day';
+    this.renderer.toneMappingExposure =
+      mood === 'day' ? 1.14 : mood === 'sunset' ? 1.08 : mood === 'mist' ? 1.04 : 1.06;
+    this.scene.environmentIntensity =
+      mood === 'day' ? 0.94 : mood === 'sunset' ? 0.92 : mood === 'mist' ? 0.85 : 0.88;
     if (this.bloomPass) {
       this.bloomPass.strength = cfg.bloomStrength;
       this.bloomPass.radius = cfg.bloomRadius;
@@ -1038,8 +1142,9 @@ export class MinatoEngine {
 
     const leader = this.getActiveUnit();
     if (leader) {
-      this.aimPoint.set(leader.x + 2.5, 1.15, leader.z - 2.0);
-      this.camTarget.set(leader.x, 1.5, leader.z);
+      const leaderY = getTerrainHeightAt(leader.x, leader.z);
+      this.aimPoint.set(leader.x + 2.5, leaderY + 1.15, leader.z - 2.0);
+      this.camTarget.set(leader.x, leaderY + 1.5, leader.z);
       const horiz = Math.cos(this.camPitch) * this.camDist;
       const vert = Math.sin(this.camPitch) * this.camDist;
       this.camPos.set(
@@ -1083,10 +1188,11 @@ export class MinatoEngine {
     const leader = this.getActiveUnit();
 
     if (this.stance === 'hold' && leader) {
+      const ly = getTerrainHeightAt(leader.x, leader.z);
       this.holdAnchor = { x: leader.x, z: leader.z };
-      this.holdBeacon.group.position.set(leader.x, 0, leader.z);
+      this.holdBeacon.group.position.set(leader.x, ly, leader.z);
       this.holdBeacon.group.visible = true;
-      this.spawnBurst(leader.x, 0.5, leader.z, 0xf5b971, 10, 4.4, 0.36);
+      this.spawnBurst(leader.x, ly + 0.5, leader.z, 0xf5b971, 10, 4.4, 0.36);
     } else {
       this.holdAnchor = null;
       this.holdBeacon.group.visible = false;
@@ -1099,6 +1205,80 @@ export class MinatoEngine {
     this.audio.play('stanceOrder');
     this.pushToast(meta.toast, meta.color);
     this.emitHud();
+  }
+
+  public setReviveButtonHeld(held: boolean): void {
+    this.reviveButtonHeld = held;
+  }
+
+  public triggerInteract(): void {
+    this.audio.unlock();
+    if (this.state !== 'playing' || this.inspectMode) return;
+    const leader = this.getActiveUnit();
+    if (!leader) return;
+
+    // 1. Check nearby downed teammate (not yet bled out)
+    const downedNearby = this.squad.find(
+      (m) =>
+        m.down &&
+        !m.bledOut &&
+        Math.hypot(leader.x - m.x, leader.z - m.z) <= REVIVE_INTERACT_RADIUS,
+    );
+    if (downedNearby) {
+      this.pushToast(`УДЕРЖИВАЙТЕ [E], ЧТОБЫ ПОДНЯТЬ: ${downedNearby.name}`, '#6ee782');
+      return;
+    }
+
+    // 2. Check nearby Security Shutter keypad/doorway
+    for (let i = 0; i < SHUTTER_SPECS.length; i++) {
+      const spec = SHUTTER_SPECS[i];
+      const dPanel = Math.hypot(leader.x - spec.panelX, leader.z - spec.panelZ);
+      const dCenter = Math.hypot(leader.x - spec.x, leader.z - spec.z);
+      if (Math.min(dPanel, dCenter) <= SHUTTER_INTERACT_RADIUS) {
+        const cur = this.shutterStates[i];
+        if (!cur) continue;
+        if (cur.status === 'open') {
+          const step = updateShutterState(cur, 0, true, 0);
+          this.shutterStates[i] = step.state;
+          this.syncShutterCollider(i);
+          this.playSpatial('shutterClose', spec.x, spec.z, 1.0);
+          this.addTrauma(0.24);
+          this.spawnBurst(spec.x, getTerrainHeightAt(spec.x, spec.z) + 1.2, spec.z, 0xf5b971, 10, 5.2, 0.34);
+          this.pushToast(`${spec.label} ОПУЩЕНА — ПРОХОД ЗАБЛОКИРОВАН!`, '#f5b971');
+          this.emitHud();
+          return;
+        }
+        if (cur.status === 'cooldown') {
+          this.audio.play('emptyClick');
+          this.pushToast(`${spec.label}: ПЕРЕЗАГРУЗКА (${Math.ceil(cur.timer)}С)`, '#ff5a72');
+          return;
+        }
+        if (cur.status === 'sealed') {
+          this.pushToast(`${spec.label} УДЕРЖИВАЕТ ОРДУ (${Math.ceil(cur.timer)}С)`, '#f5b971');
+          return;
+        }
+      }
+    }
+  }
+
+  private syncShutterCollider(idx: number): void {
+    const colIdx = this.shutterColliderIndices[idx];
+    const col = this.world.colliders[colIdx];
+    const st = this.shutterStates[idx];
+    const spec = SHUTTER_SPECS[idx];
+    if (!col || !st || !spec) return;
+    if (st.status === 'sealed') {
+      col.x1 = spec.collider.x1;
+      col.z1 = spec.collider.z1;
+      col.x2 = spec.collider.x2;
+      col.z2 = spec.collider.z2;
+      col.tall = true;
+    } else {
+      col.x1 = -999;
+      col.z1 = -999;
+      col.x2 = -999;
+      col.z2 = -999;
+    }
   }
 
   public togglePause(): void {
@@ -1143,20 +1323,28 @@ export class MinatoEngine {
     this.emitHud();
   }
 
-  public cycleMood(): void {
-    const order: LightingMood[] = ['night', 'sunset', 'mist'];
-    const next = order[(order.indexOf(this.mood) + 1) % order.length];
+  public setMood(next: LightingMood, silent = false): void {
     this.mood = next;
     this.world.applyMood(next);
     this.applyPostProcessMood(next);
-    const label =
-      next === 'night'
-        ? 'АТМОСФЕРА: НОЧНОЙ НЕОН'
-        : next === 'sunset'
-          ? 'АТМОСФЕРА: CITY POP ЗАКАТ'
-          : 'АТМОСФЕРА: ПОРТОВЫЙ ТУМАН';
-    this.pushToast(label, next === 'sunset' ? '#f5b971' : '#4ce0e8');
+    if (!silent) {
+      const label =
+        next === 'night'
+          ? 'ОСВЕЩЕНИЕ: НОЧЬ (НУАР)'
+          : next === 'day'
+            ? 'ОСВЕЩЕНИЕ: ДЕНЬ (ЭТАЛОН)'
+            : next === 'sunset'
+              ? 'ОСВЕЩЕНИЕ: ЗАКАТ'
+              : 'ОСВЕЩЕНИЕ: ПОРТОВЫЙ ТУМАН';
+      this.pushToast(label, next === 'day' || next === 'sunset' ? '#f5b971' : '#4ce0e8');
+    }
     this.emitHud();
+  }
+
+  public cycleMood(): void {
+    const order: LightingMood[] = ['night', 'day', 'sunset', 'mist'];
+    const next = order[(order.indexOf(this.mood) + 1) % order.length];
+    this.setMood(next, false);
   }
 
   public toggleMute(): void {
@@ -1297,11 +1485,13 @@ export class MinatoEngine {
       u.skillCd = u.skillMaxCd;
       this.rallyBuffTimer = 5.5;
       this.audio.play('rally');
-      this.spawnBurst(u.x, 1.2, u.z, 0xf5b971, 16, 6.5, 0.5);
+      const uy = getTerrainHeightAt(u.x, u.z);
+      this.spawnBurst(u.x, uy + 1.2, u.z, 0xf5b971, 16, 6.5, 0.5);
       this.pushToast('КОМАНДИР: ПРИКАЗ «ШКВАЛ ОГНЯ»!', '#f5b971');
     } else if (idx === 1) {
       u.skillCd = u.skillMaxCd;
       this.audio.play('medBeacon');
+      const uy = getTerrainHeightAt(u.x, u.z);
       const grp = new THREE.Group();
       const base = new THREE.Mesh(
         new THREE.CylinderGeometry(0.42, 0.52, 0.38, 12),
@@ -1326,12 +1516,15 @@ export class MinatoEngine {
       aura.rotation.x = -Math.PI / 2;
       aura.position.y = 0.08;
       grp.add(aura);
-      grp.position.set(u.x, 0, u.z);
+      grp.position.set(u.x, uy, u.z);
       this.scene.add(grp);
       this.medBeacons.push({ x: u.x, z: u.z, r: 4.8, life: 6.5, tick: 0, mesh: grp });
       this.squad.forEach((m) => {
         if (m.down) {
           m.down = false;
+          m.bledOut = false;
+          m.bleedoutTimer = DOWNED_BLEEDOUT_SEC;
+          m.reviveProgress = 0;
           m.hp = Math.round(m.maxHp * 0.62);
           m.ghostHp = m.hp;
           this.pushToast(`${m.name} ПОДНЯТ В СТРОЙ!`, '#6ee782');
@@ -1341,6 +1534,7 @@ export class MinatoEngine {
     } else if (idx === 2) {
       u.skillCd = u.skillMaxCd;
       this.audio.play('grenadeThrow');
+      const uy = getTerrainHeightAt(u.x, u.z);
       const dx = this.aimPoint.x - u.x;
       const dz = this.aimPoint.z - u.z;
       const dist = Math.hypot(dx, dz) || 1;
@@ -1351,12 +1545,12 @@ export class MinatoEngine {
         this.grenadeGeo,
         new THREE.MeshBasicMaterial({ color: 0xff8c42 }),
       );
-      mesh.position.set(u.x, 1.3, u.z);
+      mesh.position.set(u.x, uy + 1.3, u.z);
       this.scene.add(mesh);
       this.projectiles.push({
         kind: 'grenade',
         x: u.x,
-        y: 1.3,
+        y: uy + 1.3,
         z: u.z,
         vx: 0,
         vz: 0,
@@ -1367,6 +1561,7 @@ export class MinatoEngine {
         t: 0,
         dur: 0.48,
         dmg: 0,
+        knockback: 0,
         life: 1,
         pierce: true,
         mesh,
@@ -1374,6 +1569,7 @@ export class MinatoEngine {
       this.pushToast('ТЯЖЁЛЫЙ: ОСКОЛОЧНАЯ ГРАНАТА!', '#f28c52');
     } else if (idx === 3) {
       u.skillCd = u.skillMaxCd;
+      const uy = getTerrainHeightAt(u.x, u.z);
       const ang = Math.atan2(this.aimPoint.x - u.x, this.aimPoint.z - u.z);
       u.yaw = ang;
       const maxLen = 40;
@@ -1396,7 +1592,7 @@ export class MinatoEngine {
         if (e.dying || e.hp <= 0) return;
         const t = Math.max(0, Math.min(1, ((e.x - u.x) * bx + (e.z - u.z) * bz) / lenSq));
         if (Math.hypot(e.x - (u.x + t * bx), e.z - (u.z + t * bz)) <= e.r + 0.95) {
-          this.damageEnemy(e, 210, true, Math.sin(ang), Math.cos(ang), true);
+          this.damageEnemy(e, 210, true, Math.sin(ang), Math.cos(ang), true, 7.5);
           hitCount++;
         }
       });
@@ -1407,9 +1603,16 @@ export class MinatoEngine {
           this.damageBarrel(br, 100);
         }
       });
+      this.world.vehicles.forEach((veh) => {
+        if (!veh.destructible || veh.destroyed) return;
+        const t = Math.max(0, Math.min(1, ((veh.x - u.x) * bx + (veh.z - u.z) * bz) / lenSq));
+        if (Math.hypot(veh.x - (u.x + t * bx), veh.z - (u.z + t * bz)) <= Math.max(veh.hx, veh.hz) + 0.6) {
+          this.damageVehicle(veh, 85);
+        }
+      });
       const beamMat = new THREE.MeshBasicMaterial({ color: 0x4ce0e8, transparent: true, opacity: 1 });
       const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, Math.hypot(bx, bz), 8), beamMat);
-      beam.position.set((u.x + ex) / 2, 1.18, (u.z + ez) / 2);
+      beam.position.set((u.x + ex) / 2, uy + 1.18, (u.z + ez) / 2);
       beam.rotation.z = Math.PI / 2;
       beam.rotation.y = Math.atan2(-bz, bx);
       this.scene.add(beam);
@@ -1433,23 +1636,27 @@ export class MinatoEngine {
       const progress = Math.min(1, u.reloadElapsed / u.reloadTime);
       const outcome = evaluateActiveReload(progress, u.reloadAttempted);
       if (outcome === 'perfect') {
+        const res = consumeReserveForReload(u.magAmmo, u.magMax, u.reserveAmmo);
         u.reloadAttempted = true;
         u.reloading = false;
         u.reloadJammed = false;
         u.reloadElapsed = 0;
-        u.magAmmo = u.magMax;
+        u.magAmmo = res.newMag;
+        u.reserveAmmo = res.newReserve;
         u.overchargeTimer = ACTIVE_RELOAD_OVERCHARGE_SEC;
+        const uy = getTerrainHeightAt(u.x, u.z);
         this.audio.play('reloadPerfect');
-        this.spawnBurst(u.x, 1.35, u.z, 0x4ce0e8, 10, 5.2, 0.34);
-        this.spawnDamagePopup(u.x, 2.25, u.z, 'ИДЕАЛЬНО +35%', '#f5b971', 1.75);
+        this.spawnBurst(u.x, uy + 1.35, u.z, 0x4ce0e8, 10, 5.2, 0.34);
+        this.spawnDamagePopup(u.x, uy + 2.25, u.z, 'ИДЕАЛЬНО +35%', '#f5b971', 1.75);
         this.pushToast('ИДЕАЛЬНАЯ ПЕРЕЗАРЯДКА: УРОН +35%!', '#f5b971');
         this.emitHud();
       } else if (outcome === 'jam') {
+        const uy = getTerrainHeightAt(u.x, u.z);
         u.reloadAttempted = true;
         u.reloadJammed = true;
         u.reloadElapsed = Math.max(0, u.reloadElapsed - ACTIVE_RELOAD_JAM_PENALTY_SEC);
         this.audio.play('reloadJam');
-        this.spawnDamagePopup(u.x, 2.15, u.z, 'ЗАКЛИНИЛО', '#ff5a72', 1.5);
+        this.spawnDamagePopup(u.x, uy + 2.15, u.z, 'ЗАКЛИНИЛО', '#ff5a72', 1.5);
         this.emitHud();
       }
       return;
@@ -1463,6 +1670,14 @@ export class MinatoEngine {
 
   private startUnitReload(u: SquadMember, isLeader: boolean): void {
     if (u.reloading) return;
+    if (u.reserveAmmo <= 0) {
+      if (isLeader && u.emptyClickCd <= 0) {
+        u.emptyClickCd = 1.6;
+        this.audio.play('emptyClick');
+        this.pushToast('НЕТ ПАТРОНОВ В ЗАПАСЕ! ИЩИТЕ ЯЩИК ИЛИ ТРОФЕИ', '#ff5a72');
+      }
+      return;
+    }
     u.reloading = true;
     u.reloadElapsed = 0;
     u.reloadAttempted = false;
@@ -1514,13 +1729,10 @@ export class MinatoEngine {
     this.steamPuffs.forEach((s) => s.sprite.material.dispose());
     this.particleMesh.geometry.dispose();
     (this.particleMesh.material as THREE.Material).dispose();
-    this.bloomPass?.dispose();
-    this.outputPass?.dispose();
-    this.gradePass?.dispose();
-    this.normalDepthTarget?.depthTexture?.dispose();
-    this.normalDepthTarget?.dispose();
+    this.disposePostProcessing();
     this.normalOverrideMat.dispose();
-    this.composer?.dispose();
+    this.nightEnvMap.dispose();
+    this.dayEnvMap.dispose();
     this.world.vehicles.forEach((v) => v.glbInstance?.dispose());
     this.textures.dispose();
     this.assets.dispose();
@@ -1607,6 +1819,32 @@ export class MinatoEngine {
     this.defeatBeatTimer = 0;
     this.summary = null;
     this.evacRing.visible = false;
+    this.recoilKickX = 0;
+    this.recoilKickZ = 0;
+    this.currentSpreadRatio = 0.68;
+
+    // Reset Interactive Security Shutters to open & ready
+    this.shutterStates = SHUTTER_SPECS.map(() => ({
+      status: 'open',
+      timer: 0,
+      hp: SHUTTER_MAX_HP,
+      maxHp: SHUTTER_MAX_HP,
+    }));
+    this.shutterVisualOpen = SHUTTER_SPECS.map(() => 0.0);
+    for (let i = 0; i < SHUTTER_SPECS.length; i++) {
+      this.syncShutterCollider(i);
+      const vis = this.world.shutters[i];
+      if (vis) {
+        vis.setOpenRatio(0.0, 'open');
+      }
+    }
+
+    // Reset Destructible Street Cover Vehicles
+    for (const v of this.world.vehicles) {
+      v.hp = v.maxHp;
+      v.destroyed = false;
+      v.setCharred(false);
+    }
 
     // Reset B1 Emergency Generator visuals to offline amber standby
     const gen = this.world.b1Generator;
@@ -1650,6 +1888,7 @@ export class MinatoEngine {
       id: number;
       name: string;
       role: SquadRole;
+      weaponRoleLabel: string;
       color: string;
       hex: number;
       jacket: number;
@@ -1660,6 +1899,10 @@ export class MinatoEngine {
       speed: number;
       fireRate: number;
       magMax: number;
+      reserveMax: number;
+      pelletCount: number;
+      armorPiercing: boolean;
+      knockback: number;
       reloadTime: number;
       dmg: number;
       range: number;
@@ -1673,6 +1916,7 @@ export class MinatoEngine {
         id: 0,
         name: 'КОМАНДИР',
         role: 'leader',
+        weaponRoleLabel: 'КАРАБИН',
         color: '#f5b971',
         hex: 0xf5b971,
         jacket: 0x4b5c82,
@@ -1683,10 +1927,14 @@ export class MinatoEngine {
         speed: 8.8,
         fireRate: 0.16,
         magMax: 28,
+        reserveMax: 140,
+        pelletCount: 1,
+        armorPiercing: false,
+        knockback: 2.2,
         reloadTime: 1.45,
         dmg: 22,
         range: 28,
-        spread: 0.04,
+        spread: 0.045,
         skillName: 'Шквал огня',
         skillHint: 'Темп +38% отряду',
         skillMaxCd: 11,
@@ -1696,6 +1944,7 @@ export class MinatoEngine {
         id: 1,
         name: 'МЕДИК',
         role: 'medic',
+        weaponRoleLabel: 'ПП · СПАС',
         color: '#6ee782',
         hex: 0x6ee782,
         jacket: 0xd9ceb8,
@@ -1703,13 +1952,17 @@ export class MinatoEngine {
         dz: 1.4,
         r: 0.56,
         hp: 125,
-        speed: 9.0,
-        fireRate: 0.2,
-        magMax: 32,
-        reloadTime: 1.35,
-        dmg: 16,
-        range: 26,
-        spread: 0.07,
+        speed: 9.1,
+        fireRate: 0.14,
+        magMax: 34,
+        reserveMax: 170,
+        pelletCount: 1,
+        armorPiercing: false,
+        knockback: 1.4,
+        reloadTime: 1.32,
+        dmg: 14,
+        range: 23,
+        spread: 0.075,
         skillName: 'Мед-маяк',
         skillHint: 'Лечение + подъём',
         skillMaxCd: 13,
@@ -1719,20 +1972,25 @@ export class MinatoEngine {
         id: 2,
         name: 'ТЯЖЁЛЫЙ',
         role: 'heavy',
+        weaponRoleLabel: 'ДРОБОВИК ×6',
         color: '#f28c52',
         hex: 0xf28c52,
         jacket: 0x633a35,
         dx: 1.9,
         dz: 1.2,
         r: 0.68,
-        hp: 195,
+        hp: 200,
         speed: 8.4,
-        fireRate: 0.115,
-        magMax: 60,
-        reloadTime: 2.05,
-        dmg: 16,
-        range: 24,
-        spread: 0.11,
+        fireRate: 0.68,
+        magMax: 8,
+        reserveMax: 48,
+        pelletCount: 6,
+        armorPiercing: false,
+        knockback: 6.5,
+        reloadTime: 1.95,
+        dmg: 18,
+        range: 17,
+        spread: 0.145,
         skillName: 'Граната',
         skillHint: 'Взрыв по площади',
         skillMaxCd: 8,
@@ -1742,6 +2000,7 @@ export class MinatoEngine {
         id: 3,
         name: 'СНАЙПЕР',
         role: 'sniper',
+        weaponRoleLabel: 'ВИНТОВКА AP',
         color: '#4ce0e8',
         hex: 0x4ce0e8,
         jacket: 0x3b3356,
@@ -1750,12 +2009,16 @@ export class MinatoEngine {
         r: 0.56,
         hp: 115,
         speed: 9.0,
-        fireRate: 0.56,
+        fireRate: 0.58,
         magMax: 6,
+        reserveMax: 30,
+        pelletCount: 1,
+        armorPiercing: true,
+        knockback: 5.0,
         reloadTime: 1.75,
-        dmg: 60,
+        dmg: 62,
         range: 36,
-        spread: 0.008,
+        spread: 0.01,
         skillName: 'Рельса',
         skillHint: 'Бронебойный луч',
         skillMaxCd: 7,
@@ -1767,13 +2030,14 @@ export class MinatoEngine {
       const vis = buildSurvivorModel(d.role, d.hex, d.jacket, this.assets, this.textures);
       const px = sx + d.dx * spreadScale;
       const pz = sz + d.dz * spreadScale;
-      vis.group.position.set(px, 0, pz);
+      vis.group.position.set(px, getTerrainHeightAt(px, pz), pz);
       this.scene.add(vis.group);
       const glbInstance = this.mountSlotGlb(d.role, vis.proxyGroup, vis.customSlotMount, null);
       return {
         id: d.id,
         name: d.name,
         role: d.role,
+        weaponRoleLabel: d.weaponRoleLabel,
         color: d.color,
         hex: d.hex,
         jacket: d.jacket,
@@ -1789,6 +2053,11 @@ export class MinatoEngine {
         fireCd: 0,
         magAmmo: d.magMax,
         magMax: d.magMax,
+        reserveAmmo: d.reserveMax,
+        reserveMax: d.reserveMax,
+        pelletCount: d.pelletCount,
+        armorPiercing: d.armorPiercing,
+        knockback: d.knockback,
         reloadTime: d.reloadTime,
         reloadElapsed: 0,
         reloading: false,
@@ -1803,6 +2072,11 @@ export class MinatoEngine {
         skillCd: 0,
         skillMaxCd: d.skillMaxCd,
         down: false,
+        bledOut: false,
+        bleedoutTimer: DOWNED_BLEEDOUT_SEC,
+        reviveProgress: 0,
+        isMoving: false,
+        emptyClickCd: 0,
         rollTimer: 0,
         rollCd: 0,
         rollVx: 0,
@@ -1821,7 +2095,7 @@ export class MinatoEngine {
     // Spawn 5 interactive explosive fuel barrels in tactical choke points
     this.barrels = BARREL_SPAWNS.map((sp) => {
       const vis = buildExplosiveBarrel(this.assets, this.textures);
-      vis.group.position.set(sp.x, 0, sp.z);
+      vis.group.position.set(sp.x, getTerrainHeightAt(sp.x, sp.z), sp.z);
       this.scene.add(vis.group);
       const r = 0.56;
       const colliderIdx = this.world.colliders.length;
@@ -1849,7 +2123,7 @@ export class MinatoEngine {
     // Interactive 3D Tactical Ammo Supply Crates (rechargeable every 25s)
     this.ammoCrates = AMMO_CRATE_SPAWNS.map((sp) => {
       const vis = buildAmmoCrate(this.assets, this.textures);
-      vis.group.position.set(sp.x, 0.18, sp.z);
+      vis.group.position.set(sp.x, getTerrainHeightAt(sp.x, sp.z) + 0.18, sp.z);
       this.scene.add(vis.group);
       return {
         x: sp.x,
@@ -1866,15 +2140,28 @@ export class MinatoEngine {
     // Supplies in Walkable Record Shop Interior, Sakura Courtyard & Parking B1
     this.spawnPickup(-21.2, -4.4, 'vinyl', 'ВИНИЛ-ТАЙНИК: ПЕРЕГРУЗКА + ПАТРОНЫ + ШАШКА');
     this.spawnPickup(-24.2, -19.2, 'medkit', 'МЕДПУНКТ: +100% HP ОТРЯДУ');
-    this.spawnPickup(23.5, 6.2, 'supply', 'ПАРКИНГ B1: +2 ШАШКИ И АПТЕЧКА');
+    this.spawnPickup(23.5, 6.2, 'supply', 'ПАРКИНГ B1: +2 ШАШКИ, ПАТРОНЫ И АПТЕЧКА');
 
     this.spawnWave(1);
   }
 
-  private spawnPickup(x: number, z: number, kind: 'medkit' | 'supply' | 'vinyl', label: string): void {
-    const col = kind === 'medkit' ? 0x6ee782 : kind === 'vinyl' ? 0xf45b8a : 0xf5b971;
+  private spawnPickup(
+    x: number,
+    z: number,
+    kind: 'medkit' | 'supply' | 'vinyl' | 'ammo',
+    label: string,
+  ): void {
+    const col =
+      kind === 'medkit'
+        ? 0x6ee782
+        : kind === 'vinyl'
+          ? 0xf45b8a
+          : kind === 'ammo'
+            ? 0x4ce0e8
+            : 0xf5b971;
+    const baseY = getTerrainHeightAt(x, z) + (kind === 'ammo' ? 0.36 : 0.6);
     const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(0.92, 0.72, 0.92),
+      kind === 'ammo' ? new THREE.BoxGeometry(0.58, 0.42, 0.58) : new THREE.BoxGeometry(0.92, 0.72, 0.92),
       new THREE.MeshStandardMaterial({
         color: col,
         emissive: col,
@@ -1882,18 +2169,19 @@ export class MinatoEngine {
         roughness: 0.3,
       }),
     );
-    mesh.position.set(x, 0.6, z);
+    mesh.position.set(x, baseY, z);
     mesh.castShadow = true;
     this.scene.add(mesh);
-    this.pickups.push({ x, z, kind, label, taken: false, mesh });
+    this.pickups.push({ x, z, baseY, kind, label, taken: false, mesh });
   }
 
   private spawnFlare(x: number, z: number, life: number, lure: boolean): void {
+    const gy = getTerrainHeightAt(x, z);
     const mesh = new THREE.Mesh(
       new THREE.CylinderGeometry(0.08, 0.08, 0.42, 8),
       new THREE.MeshBasicMaterial({ color: 0xff5a72 }),
     );
-    mesh.position.set(x, 0.1, z);
+    mesh.position.set(x, gy + 0.1, z);
     mesh.rotation.z = Math.PI / 2;
     this.scene.add(mesh);
 
@@ -1907,7 +2195,7 @@ export class MinatoEngine {
         depthWrite: false,
       }),
     );
-    halo.position.set(x, 0.45, z);
+    halo.position.set(x, gy + 0.45, z);
     halo.scale.set(4.2, 4.2, 1);
     this.scene.add(halo);
 
@@ -1923,7 +2211,7 @@ export class MinatoEngine {
       }),
     );
     refl.rotation.x = -Math.PI / 2;
-    refl.position.set(x, 0.028, z);
+    refl.position.set(x, gy + 0.028, z);
     this.scene.add(refl);
 
     this.flares.push({ x, z, life, lure, mesh, halo, refl });
@@ -1944,7 +2232,7 @@ export class MinatoEngine {
         this.assets,
         this.textures,
       );
-      vis.group.position.set(sp.x, 0, sp.z);
+      vis.group.position.set(sp.x, getTerrainHeightAt(sp.x, sp.z), sp.z);
       this.scene.add(vis.group);
       const glbInstance = this.mountSlotGlb(sp.type, vis.proxyGroup, vis.customSlotMount, null);
       this.enemies.push({
@@ -1968,6 +2256,9 @@ export class MinatoEngine {
         windupMax: cfg.boss ? 0.65 : 0.55,
         windupTargetX: sp.x,
         windupTargetZ: sp.z,
+        staggerTimer: 0,
+        knockVx: 0,
+        knockVz: 0,
         steerDir: Math.random() < 0.5 ? 1 : -1,
         steerTimer: 0,
         flankPhase: Math.random() * Math.PI * 2,
@@ -2081,17 +2372,95 @@ export class MinatoEngine {
     this.combatDecalCursor = (this.combatDecalCursor + 1) % DECAL_POOL_SIZE;
     slot.mat.color.setHex(colorHex);
     slot.mat.opacity = opacity;
-    slot.mesh.position.set(x, 0.032 + this.combatDecalCursor * 0.0002, z);
+    const gy = getTerrainHeightAt(x, z);
+    slot.mesh.position.set(x, gy + 0.032 + this.combatDecalCursor * 0.0002, z);
     slot.mesh.scale.set(radius, 1, radius);
     slot.mesh.visible = true;
+  }
+
+  private downSquadMember(u: SquadMember, reason: string): void {
+    if (u.down) return;
+    u.hp = 0;
+    u.down = true;
+    u.bledOut = false;
+    u.bleedoutTimer = DOWNED_BLEEDOUT_SEC;
+    u.reviveProgress = 0;
+    u.reloading = false;
+    this.audio.play('playerHurt');
+    this.pushToast(reason, '#ff3b52');
+    this.emitHud();
+  }
+
+  private damageVehicle(v: VehicleSlotInstance, dmg: number): void {
+    if (!v.destructible || v.destroyed) return;
+    v.hp -= dmg;
+    this.playSpatial('barrelHit', v.x, v.z, 0.85);
+    this.spawnBurst(v.x, v.elevY + 0.9, v.z, 0xffd066, 4, 5.2, 0.22);
+    if (v.hp <= 0) {
+      this.detonateVehicle(v);
+    }
+  }
+
+  private detonateVehicle(v: VehicleSlotInstance): void {
+    if (v.destroyed) return;
+    v.destroyed = true;
+    v.hp = 0;
+    v.setCharred(true);
+
+    this.playSpatial('explosion', v.x, v.z, 1.0);
+    this.addTrauma(0.95);
+    this.hitstopTimer = Math.max(this.hitstopTimer, 0.065);
+    this.flashLight.color.setHex(0xff7733);
+    this.flashLight.position.set(v.x, v.elevY + 2.6, v.z);
+    this.flashLight.intensity = 13;
+
+    this.spawnCombatDecal(v.x, v.z, 4.4, 0x0c0b12, 0.82);
+    this.spawnBurst(v.x, v.elevY + 1.1, v.z, 0xffaa44, 30, 15.0, 0.68);
+    this.spawnBurst(v.x, v.elevY + 1.1, v.z, 0xff3b52, 20, 11.0, 0.52);
+
+    const rMat = new THREE.MeshBasicMaterial({
+      color: 0xff7b42,
+      transparent: true,
+      opacity: 0.94,
+      side: THREE.DoubleSide,
+    });
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.6, 1.4, 28), rMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(v.x, v.elevY + 0.14, v.z);
+    this.scene.add(ring);
+    this.fxList.push({ kind: 'ring', mesh: ring, mat: rMat, maxScale: 7.2, life: 0.38, maxLife: 0.38 });
+
+    let hits = 0;
+    this.enemies.forEach((e) => {
+      if (e.dying || e.hp <= 0) return;
+      const dx = e.x - v.x;
+      const dz = e.z - v.z;
+      const d = Math.hypot(dx, dz) || 0.01;
+      const dmg = computeBarrelExplosionDamage(d, e.r);
+      if (dmg > 0) {
+        hits++;
+        this.damageEnemy(e, dmg, true, dx / d, dz / d, true, 8.5);
+      }
+    });
+    this.barrels.forEach((br) => {
+      if (!br.exploded && br.fuseTimer < 0 && Math.hypot(br.x - v.x, br.z - v.z) <= 8.2) {
+        br.fuseTimer = 0.16;
+      }
+    });
+    this.pushToast(
+      hits > 0 ? `АВТОМОБИЛЬ ВЗОРВАН: ПОРАЖЕНО ${hits}!` : 'АВТОМОБИЛЬ ВЗОРВАН — УКРЫТИЕ ВЫГОРЕЛО!',
+      '#ff8c42',
+    );
+    this.emitHud();
   }
 
   private damageBarrel(b: ExplosiveBarrel, dmg: number): void {
     if (b.exploded) return;
     b.hp -= dmg;
     b.hitFlash = 0.09;
+    const by = getTerrainHeightAt(b.x, b.z);
     this.audio.play('barrelHit');
-    this.spawnBurst(b.x, 0.85, b.z, 0xffd066, 5, 6.2, 0.24);
+    this.spawnBurst(b.x, by + 0.85, b.z, 0xffd066, 5, 6.2, 0.24);
     if (b.hp <= 0) {
       this.detonateBarrel(b);
     }
@@ -2103,6 +2472,7 @@ export class MinatoEngine {
     b.fuseTimer = -1;
     b.vis.intactGroup.visible = false;
     b.vis.charredGroup.visible = true;
+    const by = getTerrainHeightAt(b.x, b.z);
 
     // Neutralize barrel collider so units can traverse the cleared blast crater
     const col = this.world.colliders[b.colliderIdx];
@@ -2117,12 +2487,12 @@ export class MinatoEngine {
     this.addTrauma(0.92);
     this.hitstopTimer = Math.max(this.hitstopTimer, 0.06);
     this.flashLight.color.setHex(0xff7733);
-    this.flashLight.position.set(b.x, 2.4, b.z);
+    this.flashLight.position.set(b.x, by + 2.4, b.z);
     this.flashLight.intensity = 12;
 
     this.spawnCombatDecal(b.x, b.z, 3.6, 0x0c0b12, 0.78);
-    this.spawnBurst(b.x, 0.9, b.z, 0xffaa44, 28, 14.5, 0.62);
-    this.spawnBurst(b.x, 0.9, b.z, 0xff3b52, 18, 10.5, 0.48);
+    this.spawnBurst(b.x, by + 0.9, b.z, 0xffaa44, 28, 14.5, 0.62);
+    this.spawnBurst(b.x, by + 0.9, b.z, 0xff3b52, 18, 10.5, 0.48);
 
     const rMat = new THREE.MeshBasicMaterial({
       color: 0xff7b42,
@@ -2132,7 +2502,7 @@ export class MinatoEngine {
     });
     const ring = new THREE.Mesh(new THREE.RingGeometry(0.45, 1.15, 28), rMat);
     ring.rotation.x = -Math.PI / 2;
-    ring.position.set(b.x, 0.13, b.z);
+    ring.position.set(b.x, by + 0.13, b.z);
     this.scene.add(ring);
     this.fxList.push({ kind: 'ring', mesh: ring, mat: rMat, maxScale: 7.5, life: 0.36, maxLife: 0.36 });
 
@@ -2145,16 +2515,21 @@ export class MinatoEngine {
       const dmg = computeBarrelExplosionDamage(d, e.r);
       if (dmg > 0) {
         hits++;
-        this.damageEnemy(e, dmg, true, dx / d, dz / d, true);
+        this.damageEnemy(e, dmg, true, dx / d, dz / d, true, 7.5);
       }
     });
 
-    // Chain-detonate nearby explosive barrels with a punchy 180ms stagger!
+    // Chain-detonate nearby explosive barrels & damage nearby cover cars
     this.barrels.forEach((other) => {
       if (other !== b && !other.exploded && other.fuseTimer < 0) {
         if (Math.hypot(other.x - b.x, other.z - b.z) <= 8.4) {
           other.fuseTimer = 0.18;
         }
+      }
+    });
+    this.world.vehicles.forEach((veh) => {
+      if (veh.destructible && !veh.destroyed && Math.hypot(veh.x - b.x, veh.z - b.z) <= 7.2) {
+        this.damageVehicle(veh, 70);
       }
     });
 
@@ -2172,31 +2547,55 @@ export class MinatoEngine {
     dirX = 0,
     dirZ = 0,
     isCrit = false,
+    knockbackForce = 0,
   ): void {
     if (e.dying) return;
-    const dmg = computeDamage(baseDmg, e.armor, armorPiercing);
+    const hit = computeDirectionalArmorDamage(baseDmg, e.armor, armorPiercing, dirX, dirZ, e.yaw);
+    const dmg = hit.damage;
+    const ey = getTerrainHeightAt(e.x, e.z);
     e.hp -= dmg;
     e.awake = true;
     e.hitFlash = 0.08;
 
-    const ricochet = e.armor && !armorPiercing;
-    this.audio.play(ricochet ? 'ricochet' : 'fleshHit');
+    const ricochet = hit.hitKind === 'armor_deflect';
+    const flankCrit = hit.hitKind === 'flank_crit';
+
+    // Physical knockback impulse & non-boss stagger interrupt
+    if (knockbackForce > 0 && !ricochet) {
+      const resist = e.boss ? 0.14 : e.armor ? 0.55 : 1.0;
+      e.knockVx += dirX * knockbackForce * resist;
+      e.knockVz += dirZ * knockbackForce * resist;
+      if (!e.boss && knockbackForce >= 3.2) {
+        e.staggerTimer = Math.max(e.staggerTimer, 0.24);
+        if (e.windupTimer > 0) {
+          e.windupTimer = 0;
+          e.vis.telegraphRing.visible = false;
+        }
+      }
+    }
+
+    this.playSpatial(
+      flankCrit ? 'flankCrit' : ricochet ? 'ricochet' : 'fleshHit',
+      e.x,
+      e.z,
+      0.95,
+    );
     this.spawnBurst(
       e.x,
-      1.1,
+      ey + 1.1,
       e.z,
-      ricochet ? 0x4ce0e8 : e.ranged ? 0x7cff57 : 0xd62436,
-      ricochet ? 5 : 4,
+      flankCrit ? 0xf5b971 : ricochet ? 0x4ce0e8 : e.ranged ? 0x7cff57 : 0xd62436,
+      flankCrit ? 7 : ricochet ? 5 : 4,
       5.5,
       0.28,
     );
     this.spawnDamagePopup(
       e.x,
-      e.boss ? 3.5 : 2.05,
+      ey + (e.boss ? 3.5 : 2.05),
       e.z,
-      ricochet ? `${dmg}` : isCrit ? `${dmg}!` : `${dmg}`,
-      ricochet ? '#4ce0e8' : isCrit ? '#f5b971' : '#f8fafc',
-      isCrit ? 1.65 : ricochet ? 1.18 : 1.32,
+      flankCrit ? `ФЛАНГ ${dmg}!` : ricochet ? `БРОНЯ ${dmg}` : isCrit ? `${dmg}!` : `${dmg}`,
+      flankCrit ? '#f5b971' : ricochet ? '#4ce0e8' : isCrit ? '#f5b971' : '#f8fafc',
+      flankCrit || isCrit ? 1.65 : ricochet ? 1.18 : 1.32,
     );
 
     if (e.hp <= 0) {
@@ -2218,13 +2617,20 @@ export class MinatoEngine {
       );
       this.spawnBurst(
         e.x,
-        1.0,
+        ey + 1.0,
         e.z,
         e.ranged ? 0x7cff57 : 0xd92638,
         e.boss ? 28 : 10,
         8.5,
         0.52,
       );
+
+      // Tactical ammo pouch drop so finite reserve ammo rewards aggressive clearing
+      const squadLowAmmo = this.squad.some((m) => !m.down && m.reserveAmmo <= Math.ceil(m.reserveMax * 0.3));
+      const activeAmmoDrops = this.pickups.filter((pk) => !pk.taken && pk.kind === 'ammo').length;
+      if (activeAmmoDrops < 6 && (squadLowAmmo || Math.random() < 0.34)) {
+        this.spawnPickup(e.x, e.z, 'ammo', 'ТРОФЕЙНЫЕ ПАТРОНЫ: +35% БОЕЗАПАСА');
+      }
 
       if (e.boss) {
         this.bossDefeated = true;
@@ -2239,15 +2645,16 @@ export class MinatoEngine {
   }
 
   private explodeGrenade(x: number, z: number): void {
+    const gy = getTerrainHeightAt(x, z);
     this.audio.play('explosion');
     this.addTrauma(0.82);
     this.hitstopTimer = Math.max(this.hitstopTimer, 0.055);
     this.flashLight.color.setHex(0xff8c42);
-    this.flashLight.position.set(x, 2.2, z);
+    this.flashLight.position.set(x, gy + 2.2, z);
     this.flashLight.intensity = 10;
     this.spawnCombatDecal(x, z, 3.1, 0x0e0d15, 0.72);
-    this.spawnBurst(x, 0.8, z, 0xffa652, 22, 13, 0.55);
-    this.spawnBurst(x, 0.8, z, 0xff3b52, 14, 9, 0.45);
+    this.spawnBurst(x, gy + 0.8, z, 0xffa652, 22, 13, 0.55);
+    this.spawnBurst(x, gy + 0.8, z, 0xff3b52, 14, 9, 0.45);
 
     const rMat = new THREE.MeshBasicMaterial({
       color: 0xf5b971,
@@ -2257,7 +2664,7 @@ export class MinatoEngine {
     });
     const ring = new THREE.Mesh(new THREE.RingGeometry(0.4, 1.0, 28), rMat);
     ring.rotation.x = -Math.PI / 2;
-    ring.position.set(x, 0.12, z);
+    ring.position.set(x, gy + 0.12, z);
     this.scene.add(ring);
     this.fxList.push({ kind: 'ring', mesh: ring, mat: rMat, maxScale: 7.0, life: 0.34, maxLife: 0.34 });
 
@@ -2268,13 +2675,18 @@ export class MinatoEngine {
       const d = Math.hypot(dx, dz) || 0.01;
       const dmg = computeGrenadeFalloffDamage(d, e.r);
       if (dmg > 0) {
-        this.damageEnemy(e, dmg, true, dx / d, dz / d, true);
+        this.damageEnemy(e, dmg, true, dx / d, dz / d, true, 7.2);
       }
     });
 
     this.barrels.forEach((br) => {
       if (!br.exploded && Math.hypot(br.x - x, br.z - z) <= 7.6) {
         br.fuseTimer = 0.12;
+      }
+    });
+    this.world.vehicles.forEach((veh) => {
+      if (veh.destructible && !veh.destroyed && Math.hypot(veh.x - x, veh.z - z) <= 6.8) {
+        this.damageVehicle(veh, 65);
       }
     });
   }
@@ -2545,8 +2957,11 @@ export class MinatoEngine {
   }
 
   private updateGameplay(dt: number, tSec: number): void {
-    if (this.keysHeld.has('KeyQ')) this.camYaw += 1.45 * dt;
-    if (this.keysHeld.has('KeyE')) this.camYaw -= 1.45 * dt;
+    // Camera orbit via [ / ] keys (and right-mouse drag) — zero conflict with [Q] Stance & [E] Interact!
+    if (this.keysHeld.has('BracketLeft')) this.camYaw += 1.45 * dt;
+    if (this.keysHeld.has('BracketRight')) this.camYaw -= 1.45 * dt;
+    this.recoilKickX *= Math.exp(-16 * dt);
+    this.recoilKickZ *= Math.exp(-16 * dt);
 
     // Free Camera Inspect Mode [V]
     if (this.inspectMode) {
@@ -2594,16 +3009,21 @@ export class MinatoEngine {
       return;
     }
 
-    // Screen-to-world aim projection
+    // Screen-to-world aim projection aligned with leader elevation
+    const leaderGroundY = getTerrainHeightAt(leader.x, leader.z);
+    this.aimPlane.constant = -(leaderGroundY + 1.15);
     this.raycaster.setFromCamera(this.mouseNDC, this.camera);
     this.raycaster.ray.intersectPlane(this.aimPlane, this.aimPoint);
-    this.aimReticle.position.set(this.aimPoint.x, 0.06, this.aimPoint.z);
+    const aimGroundY = getTerrainHeightAt(this.aimPoint.x, this.aimPoint.z);
+    this.aimReticle.position.set(this.aimPoint.x, aimGroundY + 0.06, this.aimPoint.z);
 
     // Leader movement or dodge roll
+    let leaderMoving = false;
     if (leader.rollTimer > 0) {
       leader.rollTimer = Math.max(0, leader.rollTimer - dt);
       leader.x += leader.rollVx * dt;
       leader.z += leader.rollVz * dt;
+      leaderMoving = true;
     } else {
       let ix = 0;
       let iz = 0;
@@ -2612,6 +3032,7 @@ export class MinatoEngine {
       if (this.keysHeld.has('KeyA') || this.keysHeld.has('ArrowLeft')) ix -= 1;
       if (this.keysHeld.has('KeyD') || this.keysHeld.has('ArrowRight')) ix += 1;
       if (ix !== 0 || iz !== 0) {
+        leaderMoving = true;
         const len = Math.hypot(ix, iz);
         const nx = ix / len;
         const nz = iz / len;
@@ -2622,6 +3043,13 @@ export class MinatoEngine {
         leader.z += (-nx * s + nz * c) * leader.speed * boost * dt;
       }
     }
+    leader.isMoving = leaderMoving;
+
+    // Smooth dynamic reticle spread bloom reflecting movement vs stationary aim
+    const targetSpreadRatio = leaderMoving ? 1.45 : 0.68;
+    this.currentSpreadRatio += (targetSpreadRatio - this.currentSpreadRatio) * Math.min(1, dt * 10);
+    const reticleScale = 0.72 + this.currentSpreadRatio * 0.42 + (leader.recoil > 0 ? leader.recoil * 1.6 : 0);
+    this.aimReticle.scale.setScalar(reticleScale);
 
     const lastB = this.leaderTrail[this.leaderTrail.length - 1];
     if (!lastB || Math.hypot(leader.x - lastB.x, leader.z - lastB.z) > 1.4) {
@@ -2629,7 +3057,50 @@ export class MinatoEngine {
       if (this.leaderTrail.length > 35) this.leaderTrail.shift();
     }
 
+    // Update Security Shutters (timers, cooldowns, curtain animation & keypad LED)
+    for (let i = 0; i < SHUTTER_SPECS.length; i++) {
+      const st = this.shutterStates[i];
+      const spec = SHUTTER_SPECS[i];
+      const vis = this.world.shutters[i];
+      if (!st || !spec || !vis) continue;
+      const step = updateShutterState(st, dt, false, 0);
+      this.shutterStates[i] = step.state;
+      if (step.justOpened || step.justBreached || step.justReady) {
+        this.syncShutterCollider(i);
+        if (step.justOpened) {
+          this.playSpatial('shutterClose', spec.x, spec.z, 0.75);
+          this.pushToast(`${spec.label} ПОДНЯЛАСЬ (ПЕРЕЗАГРУЗКА)`, '#4ce0e8');
+        } else if (step.justReady) {
+          this.pushToast(`${spec.label} СНОВА ГОТОВА [E]`, '#4ce0e8');
+        }
+        this.emitHud();
+      }
+      const targetClosed = step.state.status === 'sealed' ? 1.0 : 0.0;
+      const curClosed = this.shutterVisualOpen[i] ?? 0.0;
+      const nextClosed = curClosed + (targetClosed - curClosed) * Math.min(1, dt * 8.5);
+      this.shutterVisualOpen[i] = nextClosed;
+      vis.setOpenRatio(nextClosed, step.state.status);
+    }
+
+    // Ambient smoke/fire VFX on damaged cover cars
+    for (const v of this.world.vehicles) {
+      if (!v.destructible || v.destroyed) continue;
+      const hpRatio = v.hp / v.maxHp;
+      if (hpRatio < 0.5 && Math.random() < (hpRatio < 0.25 ? 0.28 : 0.1)) {
+        this.spawnBurst(
+          v.x + (Math.random() - 0.5) * 1.4,
+          v.elevY + 1.1,
+          v.z + (Math.random() - 0.5) * 0.9,
+          hpRatio < 0.25 ? 0xff7b36 : 0x3b404e,
+          1,
+          1.4,
+          0.55,
+        );
+      }
+    }
+
     // Update Squad
+    const holdingRevive = this.keysHeld.has('KeyE') || this.reviveButtonHeld;
     for (let idx = 0; idx < this.squad.length; idx++) {
       const u = this.squad[idx];
       const isActive = idx === this.activeIdx;
@@ -2638,16 +3109,19 @@ export class MinatoEngine {
       if (u.rollCd > 0) u.rollCd = Math.max(0, u.rollCd - dt);
       if (u.recoil > 0) u.recoil = Math.max(0, u.recoil - dt * 5.5);
       if (u.overchargeTimer > 0) u.overchargeTimer = Math.max(0, u.overchargeTimer - dt);
+      if (u.emptyClickCd > 0) u.emptyClickCd = Math.max(0, u.emptyClickCd - dt);
 
-      // Active Reload progression
+      // Active Reload progression (consumes from finite reserveAmmo!)
       if (u.reloading && !u.down) {
         u.reloadElapsed += dt;
         if (u.reloadElapsed >= u.reloadTime) {
+          const res = consumeReserveForReload(u.magAmmo, u.magMax, u.reserveAmmo);
           u.reloading = false;
           u.reloadJammed = false;
           u.reloadAttempted = false;
           u.reloadElapsed = 0;
-          u.magAmmo = u.magMax;
+          u.magAmmo = res.newMag;
+          u.reserveAmmo = res.newReserve;
           if (isActive) {
             this.audio.play('switchUnit');
             this.emitHud();
@@ -2667,14 +3141,48 @@ export class MinatoEngine {
         u.vis.muzzleFlash.material.opacity = u.flashT / 0.06;
       }
 
-      (u.vis.ring.material as THREE.MeshBasicMaterial).opacity = isActive ? 0.92 : 0.24;
+      (u.vis.ring.material as THREE.MeshBasicMaterial).opacity = isActive ? 0.92 : u.down && !u.bledOut ? 0.55 + Math.sin(tSec * 8) * 0.25 : 0.24;
       u.vis.ring.scale.setScalar(isActive ? 1.15 : 0.9);
       u.vis.laser.visible = !u.down;
       u.vis.laserDot.visible = !u.down;
 
       if (u.down) {
+        const uy = getTerrainHeightAt(u.x, u.z);
         u.vis.bodyPivot.rotation.x = Math.PI / 2;
-        u.vis.group.position.set(u.x, 0.24, u.z);
+        u.vis.group.position.set(u.x, uy + 0.24, u.z);
+        if (!u.bledOut) {
+          const inRange = Math.hypot(leader.x - u.x, leader.z - u.z) <= REVIVE_INTERACT_RADIUS;
+          const speedMult = leader.role === 'medic' ? 1.6 : 1.0;
+          const step = updateDownedUnit(
+            u.bleedoutTimer,
+            u.reviveProgress,
+            inRange,
+            holdingRevive,
+            speedMult,
+            dt,
+          );
+          u.bleedoutTimer = step.bleedoutTimer;
+          u.reviveProgress = step.reviveProgress;
+          if (step.revivedNow) {
+            u.down = false;
+            u.bledOut = false;
+            u.bleedoutTimer = DOWNED_BLEEDOUT_SEC;
+            u.reviveProgress = 0;
+            u.hp = Math.round(u.maxHp * 0.55);
+            u.ghostHp = u.hp;
+            this.audio.play('reviveDone');
+            this.spawnBurst(u.x, uy + 1.0, u.z, 0x6ee782, 14, 5.2, 0.44);
+            this.spawnDamagePopup(u.x, uy + 2.2, u.z, 'ПОДНЯТ!', '#6ee782', 1.6);
+            this.pushToast(`${u.name} ПОДНЯТ В СТРОЙ!`, '#6ee782');
+            this.emitHud();
+          } else if (step.bledOutNow) {
+            u.bledOut = true;
+            u.bleedoutTimer = 0;
+            u.reviveProgress = 0;
+            this.pushToast(`${u.name} ИСТЁК КРОВЬЮ (ТОЛЬКО МЕД-МАЯК [2])`, '#ff3b52');
+            this.emitHud();
+          }
+        }
         continue;
       }
 
@@ -2726,6 +3234,11 @@ export class MinatoEngine {
         }
       }
 
+      const moved = Math.hypot(u.x - px, u.z - pz);
+      if (!isActive) {
+        u.isMoving = moved > 0.012;
+      }
+
       // Acid pool hazard check
       if (u.rollTimer <= 0) {
         for (let a = 0; a < this.acidPools.length; a++) {
@@ -2733,10 +3246,7 @@ export class MinatoEngine {
           if (Math.hypot(u.x - pool.x, u.z - pool.z) < pool.r) {
             u.hp -= 16 * dt;
             if (u.hp <= 0) {
-              u.hp = 0;
-              u.down = true;
-              this.audio.play('playerHurt');
-              this.pushToast(`${u.name} РАНЕН! НУЖЕН МЕД-МАЯК [2]`, '#ff3b52');
+              this.downSquadMember(u, `${u.name} РАНЕН КИСЛОТОЙ! ПОДОЙДИТЕ [E] ИЛИ МЕД-МАЯК [2]`);
             }
           }
         }
@@ -2784,68 +3294,93 @@ export class MinatoEngine {
       u.vis.laser.geometry.attributes.position.needsUpdate = true;
       u.vis.laserDot.position.set(u.vis.gunOffX, 1.16, u.vis.gunOffZ + lLen);
 
-      // Firing (with Magazine, Auto-Reload, Overcharge, Stance Bonuses & Spatial Panning!)
+      // Firing (Distinct Weapons, 6-Pellet Shotgun, Dynamic Spread, Reserve Ammo & Camera Recoil Kick!)
       const wantsFire = (isActive && this.mouseDown && u.rollTimer <= 0) || (!isActive && aiTarget !== null);
       if (wantsFire && !u.reloading && u.fireCd <= 0) {
         if (u.magAmmo <= 0) {
           this.startUnitReload(u, isActive);
         } else {
           u.magAmmo--;
+          const uy = getTerrainHeightAt(u.x, u.z);
           const genMult = this.b1GeneratorActive ? B1_GENERATOR.fireRateBoost : 1.0;
           const focusMult = !isActive && this.stance === 'focus' ? 0.85 : 1.0;
           u.fireCd = u.fireRate * (this.rallyBuffTimer > 0 ? 0.62 : 1.0) * genMult * focusMult;
           u.flashT = 0.06;
-          u.recoil = 0.14;
+          u.recoil = u.role === 'heavy' ? 0.26 : u.role === 'sniper' ? 0.24 : 0.14;
+
           const isOvercharged = u.overchargeTimer > 0;
           const shotDmg = isOvercharged ? Math.round(u.dmg * ACTIVE_RELOAD_OVERCHARGE_MULT) : u.dmg;
-          const spreadMult = !isActive && this.stance === 'hold' ? 0.72 : 1.0;
-          const ang = u.yaw + (Math.random() - 0.5) * u.spread * spreadMult;
-          const spd = u.role === 'sniper' ? 54 : 42;
-          const bx = u.x + Math.sin(ang) * 1.15;
-          const bz = u.z + Math.cos(ang) * 1.15;
-          const bMesh = new THREE.Mesh(
-            this.bulletGeo,
-            new THREE.MeshBasicMaterial({ color: isOvercharged ? 0xffe478 : u.hex }),
-          );
-          bMesh.position.set(bx, 1.16, bz);
-          bMesh.rotation.y = ang;
-          this.scene.add(bMesh);
-          this.projectiles.push({
-            kind: 'bullet',
-            x: bx,
-            y: 1.16,
-            z: bz,
-            vx: Math.sin(ang) * spd,
-            vz: Math.cos(ang) * spd,
-            sx: bx,
-            sz: bz,
-            tx: bx,
-            tz: bz,
-            t: 0,
-            dur: 1,
-            dmg: shotDmg,
-            life: u.range / spd,
-            pierce: u.role === 'sniper' || isOvercharged,
-            mesh: bMesh,
-          });
-          // Eject brass shell casing spark to right of weapon breech
+          const effSpread = computeWeaponSpread(u.spread, u.isMoving, !isActive && this.stance === 'hold');
+          const spd = u.role === 'sniper' ? 54 : u.role === 'heavy' ? 38 : 42;
+
+          for (let pIdx = 0; pIdx < u.pelletCount; pIdx++) {
+            const fanOff =
+              u.pelletCount > 1
+                ? ((pIdx / (u.pelletCount - 1)) - 0.5) * effSpread * 1.45 + (Math.random() - 0.5) * effSpread * 0.35
+                : (Math.random() - 0.5) * effSpread;
+            const ang = u.yaw + fanOff;
+            const bx = u.x + Math.sin(ang) * 1.15;
+            const bz = u.z + Math.cos(ang) * 1.15;
+            const bMesh = new THREE.Mesh(
+              this.bulletGeo,
+              new THREE.MeshBasicMaterial({ color: isOvercharged ? 0xffe478 : u.hex }),
+            );
+            if (u.pelletCount > 1) {
+              bMesh.scale.set(0.75, 0.75, 0.55);
+            }
+            bMesh.position.set(bx, uy + 1.16, bz);
+            bMesh.rotation.y = ang;
+            this.scene.add(bMesh);
+            this.projectiles.push({
+              kind: 'bullet',
+              x: bx,
+              y: uy + 1.16,
+              z: bz,
+              vx: Math.sin(ang) * spd,
+              vz: Math.cos(ang) * spd,
+              sx: bx,
+              sz: bz,
+              tx: bx,
+              tz: bz,
+              t: 0,
+              dur: 1,
+              dmg: shotDmg,
+              knockback: u.pelletCount > 1 ? u.knockback / 2.6 : u.knockback,
+              life: u.range / spd,
+              pierce: u.armorPiercing || isOvercharged,
+              mesh: bMesh,
+            });
+          }
+
+          if (isActive) {
+            const kick = u.role === 'heavy' ? 0.34 : u.role === 'sniper' ? 0.3 : 0.09;
+            this.recoilKickX -= Math.sin(u.yaw) * kick;
+            this.recoilKickZ -= Math.cos(u.yaw) * kick;
+            if (u.role === 'heavy' || u.role === 'sniper') {
+              this.addTrauma(0.14);
+            }
+          }
+
+          // Eject brass/shotgun shell casing spark to right of weapon breech
           this.spawnBurst(
-            u.x + Math.cos(ang) * 0.45,
-            1.22,
-            u.z - Math.sin(ang) * 0.45,
-            0xeab52d,
+            u.x + Math.cos(u.yaw) * 0.45,
+            uy + 1.22,
+            u.z - Math.sin(u.yaw) * 0.45,
+            u.role === 'heavy' ? 0xff4538 : 0xeab52d,
             1,
             2.8,
             0.22,
           );
+          const fxX = u.x + Math.sin(u.yaw) * 1.15;
+          const fxZ = u.z + Math.cos(u.yaw) * 1.15;
           this.flashLight.color.setHex(isOvercharged ? 0xffe478 : u.hex);
-          this.flashLight.position.set(bx, 1.4, bz);
-          this.flashLight.intensity = 3.2;
+          this.flashLight.position.set(fxX, uy + 1.4, fxZ);
+          this.flashLight.intensity = u.role === 'heavy' ? 5.0 : 3.2;
           this.playSpatial(
             u.role === 'sniper'
               ? 'sniper'
               : u.role === 'heavy'
-                ? 'heavy'
+                ? 'shotgun'
                 : u.role === 'medic'
                   ? 'smg'
                   : 'rifle',
@@ -2863,9 +3398,9 @@ export class MinatoEngine {
         }
       }
 
-      // Gait-synced animation & roll squash-stretch
-      const moved = Math.hypot(u.x - px, u.z - pz);
-      u.vis.group.position.set(u.x, u.rollTimer > 0 ? 0.42 : 0, u.z);
+      // Gait-synced animation & roll squash-stretch with multi-level terrain elevation!
+      const uy = getTerrainHeightAt(u.x, u.z);
+      u.vis.group.position.set(u.x, uy + (u.rollTimer > 0 ? 0.42 : 0), u.z);
       u.vis.group.rotation.y = u.yaw;
       if (u.rollTimer > 0) {
         u.vis.bodyPivot.rotation.x = (1 - u.rollTimer / 0.27) * Math.PI * 2;
@@ -2891,43 +3426,60 @@ export class MinatoEngine {
       }
     }
 
-    // Pickups
+    // Pickups (medkit, vinyl, supply, and enemy-dropped ammo pouches!)
     for (const pk of this.pickups) {
       if (pk.taken) continue;
       pk.mesh.rotation.y += dt * 1.8;
-      pk.mesh.position.y = 0.6 + Math.sin(tSec * 3.2) * 0.14;
+      pk.mesh.position.y = pk.baseY + Math.sin(tSec * 3.2) * 0.14;
       if (Math.hypot(leader.x - pk.x, leader.z - pk.z) < 2.3) {
         pk.taken = true;
         this.scene.remove(pk.mesh);
         this.audio.play('pickup');
-        this.pushToast(pk.label, pk.kind === 'vinyl' ? '#f45b8a' : '#6ee782');
+        this.pushToast(
+          pk.label,
+          pk.kind === 'vinyl' ? '#f45b8a' : pk.kind === 'ammo' ? '#4ce0e8' : '#6ee782',
+        );
         if (pk.kind === 'medkit') {
           this.squad.forEach((m) => {
             m.down = false;
+            m.bledOut = false;
+            m.bleedoutTimer = DOWNED_BLEEDOUT_SEC;
+            m.reviveProgress = 0;
             m.hp = m.maxHp;
             m.ghostHp = m.maxHp;
           });
         } else if (pk.kind === 'vinyl') {
-          this.flareAmmo += 1;
-          this.spawnBurst(pk.x, 1.0, pk.z, 0xf45b8a, 14, 6.8, 0.45);
+          this.flareAmmo = Math.min(MAX_FLARE_AMMO, this.flareAmmo + 1);
+          this.spawnBurst(pk.x, pk.baseY + 0.4, pk.z, 0xf45b8a, 14, 6.8, 0.45);
           this.squad.forEach((m) => {
             if (!m.down) {
               m.magAmmo = m.magMax;
+              m.reserveAmmo = m.reserveMax;
               m.reloading = false;
               m.overchargeTimer = Math.max(m.overchargeTimer, 8.0);
             }
           });
-        } else {
-          this.flareAmmo += 2;
+        } else if (pk.kind === 'ammo') {
+          this.spawnBurst(pk.x, pk.baseY + 0.3, pk.z, 0x4ce0e8, 8, 4.6, 0.32);
           this.squad.forEach((m) => {
-            if (!m.down) m.hp = Math.min(m.maxHp, m.hp + 55);
+            if (!m.bledOut) {
+              m.reserveAmmo = Math.min(m.reserveMax, m.reserveAmmo + Math.ceil(m.reserveMax * 0.35));
+            }
+          });
+        } else {
+          this.flareAmmo = Math.min(MAX_FLARE_AMMO, this.flareAmmo + 2);
+          this.squad.forEach((m) => {
+            if (!m.down) {
+              m.hp = Math.min(m.maxHp, m.hp + 55);
+              m.reserveAmmo = Math.min(m.reserveMax, m.reserveAmmo + Math.ceil(m.reserveMax * 0.5));
+            }
           });
         }
         this.emitHud();
       }
     }
 
-    // Interactive Rechargeable Ammo Supply Crates
+    // Interactive Rechargeable Ammo Supply Crates (refills both mag AND full reserve!)
     for (const crate of this.ammoCrates) {
       if (crate.cooldown > 0) {
         crate.cooldown = Math.max(0, crate.cooldown - dt);
@@ -2941,19 +3493,21 @@ export class MinatoEngine {
         crate.vis.stripMat.emissiveIntensity = 1.35 + Math.sin(tSec * 4.5) * 0.25;
         crate.vis.ringMat.opacity = 0.55 + Math.sin(tSec * 4.0) * 0.15;
         if (Math.hypot(leader.x - crate.x, leader.z - crate.z) <= AMMO_CRATE_PICKUP_RADIUS) {
+          const cy = getTerrainHeightAt(crate.x, crate.z);
           crate.cooldown = AMMO_CRATE_COOLDOWN_SEC;
           this.flareAmmo = Math.min(MAX_FLARE_AMMO, this.flareAmmo + 1);
           this.squad.forEach((m) => {
             m.magAmmo = m.magMax;
+            m.reserveAmmo = m.reserveMax;
             m.reloading = false;
             m.reloadJammed = false;
             m.reloadElapsed = 0;
             m.skillCd = Math.max(0, m.skillCd - m.skillMaxCd * 0.25);
           });
           this.playSpatial('ammoCrate', crate.x, crate.z, 1.0);
-          this.spawnBurst(crate.x, 1.1, crate.z, 0x4ce0e8, 14, 5.2, 0.45);
-          this.spawnDamagePopup(crate.x, 2.2, crate.z, '+ПАТРОНЫ +1 ШАШКА', '#4ce0e8', 1.65);
-          this.pushToast(`ЯЩИК БОЕПРИПАСОВ (${crate.zoneLabel}): МАГАЗИНЫ +1 ШАШКА`, '#4ce0e8');
+          this.spawnBurst(crate.x, cy + 1.1, crate.z, 0x4ce0e8, 14, 5.2, 0.45);
+          this.spawnDamagePopup(crate.x, cy + 2.2, crate.z, '+БОЕЗАПАС 100%', '#4ce0e8', 1.65);
+          this.pushToast(`ЯЩИК БОЕПРИПАСОВ (${crate.zoneLabel}): ПОЛНЫЙ БОЕЗАПАС +1 ШАШКА`, '#4ce0e8');
           this.emitHud();
         }
       }
@@ -2984,7 +3538,7 @@ export class MinatoEngine {
       if (fIdx !== null) {
         const fe = this.enemies[fIdx];
         this.focusTargetRing.visible = true;
-        this.focusTargetRing.position.set(fe.x, 0.08, fe.z);
+        this.focusTargetRing.position.set(fe.x, getTerrainHeightAt(fe.x, fe.z) + 0.08, fe.z);
         const s = (fe.boss ? 1.7 : 1.0) * (1 + Math.sin(tSec * 8) * 0.08);
         this.focusTargetRing.scale.set(s, s, 1);
       } else {
@@ -3015,7 +3569,8 @@ export class MinatoEngine {
 
     // Med Beacons
     if (this.medBeacons.length > 0) {
-      this.medLight.position.set(this.medBeacons[0].x, 1.5, this.medBeacons[0].z);
+      const mb0 = this.medBeacons[0];
+      this.medLight.position.set(mb0.x, getTerrainHeightAt(mb0.x, mb0.z) + 1.5, mb0.z);
       this.medLight.intensity = 2.6 + Math.sin(tSec * 8) * 0.6;
     } else {
       this.medLight.intensity = 0;
@@ -3031,7 +3586,11 @@ export class MinatoEngine {
           if (Math.hypot(m.x - mb.x, m.z - mb.z) <= mb.r) {
             if (m.down) {
               m.down = false;
+              m.bledOut = false;
+              m.bleedoutTimer = DOWNED_BLEEDOUT_SEC;
+              m.reviveProgress = 0;
               m.hp = Math.round(m.maxHp * 0.55);
+              m.ghostHp = m.hp;
             } else {
               m.hp = Math.min(m.maxHp, m.hp + 14);
             }
@@ -3065,7 +3624,8 @@ export class MinatoEngine {
         const p = Math.min(1, b.t / b.dur);
         b.x = b.sx + (b.tx - b.sx) * p;
         b.z = b.sz + (b.tz - b.sz) * p;
-        b.y = 1.3 * (1 - p) + 4.8 * 4 * p * (1 - p) + 0.25;
+        const groundY = getTerrainHeightAt(b.x, b.z);
+        b.y = groundY + 1.3 * (1 - p) + 4.8 * 4 * p * (1 - p) + 0.25;
         b.mesh.position.set(b.x, b.y, b.z);
         if (p >= 1 || isPointInsideTallWall(b.x, b.z, this.world.colliders)) {
           this.explodeGrenade(b.x, b.z);
@@ -3078,7 +3638,8 @@ export class MinatoEngine {
       b.x += b.vx * dt;
       b.z += b.vz * dt;
       b.life -= dt;
-      b.mesh.position.set(b.x, b.kind === 'acid' ? 0.92 : 1.16, b.z);
+      const projGroundY = getTerrainHeightAt(b.x, b.z);
+      b.mesh.position.set(b.x, projGroundY + (b.kind === 'acid' ? 0.92 : 1.16), b.z);
 
       if (b.kind === 'acid') {
         if (b.life <= 0 || isPointInsideTallWall(b.x, b.z, this.world.colliders)) {
@@ -3087,7 +3648,7 @@ export class MinatoEngine {
             new THREE.MeshBasicMaterial({ color: 0x6ee750, transparent: true, opacity: 0.48 }),
           );
           pm.rotation.x = -Math.PI / 2;
-          pm.position.set(b.x, 0.055, b.z);
+          pm.position.set(b.x, projGroundY + 0.055, b.z);
           this.scene.add(pm);
           this.acidPools.push({ x: b.x, z: b.z, r: 1.9, life: 5.2, mesh: pm });
           this.scene.remove(b.mesh);
@@ -3097,10 +3658,10 @@ export class MinatoEngine {
         for (const u of this.squad) {
           if (!u.down && u.rollTimer <= 0 && Math.hypot(u.x - b.x, u.z - b.z) < u.r + 0.42) {
             u.hp = Math.max(0, u.hp - 14);
-            this.audio.play('playerHurt');
             if (u.hp <= 0) {
-              u.down = true;
-              this.pushToast(`${u.name} РАНЕН!`, '#ff3b52');
+              this.downSquadMember(u, `${u.name} РАНЕН! ПОДОЙДИТЕ [E] ИЛИ МЕД-МАЯК [2]`);
+            } else {
+              this.audio.play('playerHurt');
             }
             this.scene.remove(b.mesh);
             this.projectiles.splice(i, 1);
@@ -3111,7 +3672,7 @@ export class MinatoEngine {
       }
 
       if (b.life <= 0 || isPointInsideTallWall(b.x, b.z, this.world.colliders)) {
-        this.spawnBurst(b.x, 1.15, b.z, 0xf5b971, 2, 4, 0.16);
+        this.spawnBurst(b.x, projGroundY + 1.15, b.z, 0xf5b971, 2, 4, 0.16);
         this.scene.remove(b.mesh);
         this.projectiles.splice(i, 1);
         continue;
@@ -3123,7 +3684,15 @@ export class MinatoEngine {
         if (e.dying || e.hp <= 0) continue;
         if (Math.hypot(e.x - b.x, e.z - b.z) <= e.r + 0.36) {
           const vlen = Math.hypot(b.vx, b.vz) || 1;
-          this.damageEnemy(e, b.dmg, b.pierce, b.vx / vlen, b.vz / vlen, b.pierce && b.dmg >= 26);
+          this.damageEnemy(
+            e,
+            b.dmg,
+            b.pierce,
+            b.vx / vlen,
+            b.vz / vlen,
+            b.pierce && b.dmg >= 26,
+            b.knockback,
+          );
           this.scene.remove(b.mesh);
           this.projectiles.splice(i, 1);
           hitAnything = true;
@@ -3137,6 +3706,20 @@ export class MinatoEngine {
         if (br.exploded) continue;
         if (Math.hypot(br.x - b.x, br.z - b.z) <= br.r + 0.35) {
           this.damageBarrel(br, b.dmg);
+          this.scene.remove(b.mesh);
+          this.projectiles.splice(i, 1);
+          hitAnything = true;
+          break;
+        }
+      }
+      if (hitAnything) continue;
+
+      // Destructible cover vehicles absorb gunfire until they smoke, catch fire, and explode!
+      for (let vIdx = 0; vIdx < this.world.vehicles.length; vIdx++) {
+        const veh = this.world.vehicles[vIdx];
+        if (!veh.destructible || veh.destroyed) continue;
+        if (Math.abs(b.x - veh.x) <= veh.hx + 0.25 && Math.abs(b.z - veh.z) <= veh.hz + 0.25) {
+          this.damageVehicle(veh, b.dmg);
           this.scene.remove(b.mesh);
           this.projectiles.splice(i, 1);
           break;
@@ -3169,7 +3752,7 @@ export class MinatoEngine {
         e.koVx *= 0.88;
         e.koVz *= 0.88;
         const p = 1 - Math.max(0, e.koTimer / 0.36);
-        e.vis.group.position.set(e.x, 0.12 * (1 - p), e.z);
+        e.vis.group.position.set(e.x, getTerrainHeightAt(e.x, e.z) + 0.12 * (1 - p), e.z);
         e.vis.group.rotation.x = -p * (Math.PI / 2);
         e.vis.group.scale.setScalar(Math.max(0.05, 1 - p * 0.45));
         if (e.glbInstance) {
@@ -3192,6 +3775,26 @@ export class MinatoEngine {
       if (e.atkCd > 0) e.atkCd = Math.max(0, e.atkCd - dt);
       if (e.specialCd > 0) e.specialCd = Math.max(0, e.specialCd - dt);
       if (e.steerTimer > 0) e.steerTimer = Math.max(0, e.steerTimer - dt);
+
+      // Physical knockback decay & hit-stagger recoil
+      if (Math.hypot(e.knockVx, e.knockVz) > 0.12) {
+        e.x += e.knockVx * dt;
+        e.z += e.knockVz * dt;
+        const decay = Math.exp(-9.5 * dt);
+        e.knockVx *= decay;
+        e.knockVz *= decay;
+        for (let c = 0; c < this.world.colliders.length; c++) {
+          resolveCircleBox(e, this.world.colliders[c]);
+        }
+      }
+      if (e.staggerTimer > 0) {
+        e.staggerTimer = Math.max(0, e.staggerTimer - dt);
+        e.vis.group.position.set(e.x, getTerrainHeightAt(e.x, e.z), e.z);
+        e.vis.group.rotation.y = e.yaw;
+        e.vis.group.rotation.x = -0.28 * (e.staggerTimer / 0.24);
+        continue;
+      }
+      e.vis.group.rotation.x = 0;
 
       let target: SquadMember | null = null;
       let minD = Infinity;
@@ -3228,13 +3831,40 @@ export class MinatoEngine {
         const dist = Math.hypot(dx, dz) || 1;
         e.yaw = Math.atan2(dx, dz);
 
+        // Enemies blocked by a sealed Security Shutter pound on it until breach!
+        let poundingShutter = false;
+        for (let shIdx = 0; shIdx < SHUTTER_SPECS.length; shIdx++) {
+          const shSt = this.shutterStates[shIdx];
+          const spec = SHUTTER_SPECS[shIdx];
+          if (!shSt || shSt.status !== 'sealed') continue;
+          const col = spec.collider;
+          const cx = Math.max(col.x1, Math.min(col.x2, e.x));
+          const cz = Math.max(col.z1, Math.min(col.z2, e.z));
+          if (Math.hypot(e.x - cx, e.z - cz) <= e.r + 0.95) {
+            poundingShutter = true;
+            if (e.atkCd <= 0) {
+              e.atkCd = e.boss ? 1.0 : 1.15;
+              const step = updateShutterState(shSt, 0, false, e.boss ? 55 : 22);
+              this.shutterStates[shIdx] = step.state;
+              this.playSpatial('shutterClang', spec.x, spec.z, 0.9);
+              this.spawnBurst(cx, getTerrainHeightAt(cx, cz) + 1.1, cz, 0xffc86b, 5, 4.8, 0.24);
+              if (step.justBreached) {
+                this.syncShutterCollider(shIdx);
+                this.addTrauma(0.36);
+                this.pushToast(`${spec.label} ПРОРВАНА ОРДОЙ!`, '#ff3b52');
+                this.emitHud();
+              }
+            }
+            break;
+          }
+        }
+
         // Active windup telegraph resolution (Spitter Acid Charge & Tank Ground Slam!)
         if (e.windupTimer > 0) {
           e.windupTimer -= dt;
           const progress = 1 - Math.max(0, e.windupTimer / e.windupMax);
           e.vis.telegraphRing.visible = true;
           e.vis.telegraphRing.scale.setScalar(0.45 + progress * 0.75);
-          // Raise arms during windup
           e.vis.armL.rotation.x = -0.9 * progress;
           e.vis.armR.rotation.x = -1.2 * progress;
 
@@ -3247,13 +3877,14 @@ export class MinatoEngine {
               const sdz = e.windupTargetZ - e.z;
               const sDist = Math.hypot(sdx, sdz) || 1;
               const spd = 15.5;
+              const ey = getTerrainHeightAt(e.x, e.z);
               const am = new THREE.Mesh(this.acidGeo, new THREE.MeshBasicMaterial({ color: 0x7cff57 }));
-              am.position.set(e.x, 1.0, e.z);
+              am.position.set(e.x, ey + 1.0, e.z);
               this.scene.add(am);
               this.projectiles.push({
                 kind: 'acid',
                 x: e.x,
-                y: 1.0,
+                y: ey + 1.0,
                 z: e.z,
                 vx: (sdx / sDist) * spd,
                 vz: (sdz / sDist) * spd,
@@ -3264,16 +3895,17 @@ export class MinatoEngine {
                 t: 0,
                 dur: 1,
                 dmg: 14,
+                knockback: 0,
                 life: sDist / spd,
                 pierce: false,
                 mesh: am,
               });
             } else if (e.policy === 'charger') {
-              // Tank Heavy Ground Slam shockwave!
+              const ey = getTerrainHeightAt(e.x, e.z);
               this.audio.play('tankSlam');
               this.addTrauma(0.75);
               this.hitstopTimer = Math.max(this.hitstopTimer, 0.045);
-              this.spawnBurst(e.x, 0.5, e.z, 0xff3b52, 18, 10, 0.45);
+              this.spawnBurst(e.x, ey + 0.5, e.z, 0xff3b52, 18, 10, 0.45);
               const slamMat = new THREE.MeshBasicMaterial({
                 color: 0xff3b52,
                 transparent: true,
@@ -3282,7 +3914,7 @@ export class MinatoEngine {
               });
               const slamRing = new THREE.Mesh(new THREE.RingGeometry(0.6, 1.1, 24), slamMat);
               slamRing.rotation.x = -Math.PI / 2;
-              slamRing.position.set(e.x, 0.12, e.z);
+              slamRing.position.set(e.x, ey + 0.12, e.z);
               this.scene.add(slamRing);
               this.fxList.push({
                 kind: 'ring',
@@ -3297,17 +3929,16 @@ export class MinatoEngine {
                 const dSlam = Math.hypot(u.x - e.x, u.z - e.z);
                 if (dSlam < 4.5 + u.r) {
                   u.hp = Math.max(0, u.hp - e.dmg);
-                  this.audio.play('playerHurt');
                   if (u.hp <= 0) {
-                    u.down = true;
-                    this.pushToast(`${u.name} РАНЕН УДАРОМ ТАНКА!`, '#ff3b52');
+                    this.downSquadMember(u, `${u.name} РАНЕН УДАРОМ ТАНКА! ПОДОЙДИТЕ [E]`);
+                  } else {
+                    this.audio.play('playerHurt');
                   }
                 }
               }
             }
           }
-        } else {
-          // Policy-specific movement & attack initiation
+        } else if (!poundingShutter) {
           const px = e.x;
           const pz = e.z;
           let moveVx = dx / dist;
@@ -3315,7 +3946,6 @@ export class MinatoEngine {
           let shouldMove = dist > e.r + (lured ? 1.4 : target.r + 0.25);
 
           if (e.policy === 'kiter' && !lured) {
-            // Spitter kites: backs away if too close (< 6.5m), fires telegraphed acid in sweet spot (7..16m)
             if (dist < 6.5) {
               moveVx = -dx / dist;
               moveVz = -dz / dist;
@@ -3331,7 +3961,6 @@ export class MinatoEngine {
               }
             }
           } else if (e.policy === 'flanker' && !lured && dist > 3.5) {
-            // Runner zig-zag flanks perpendicularly while sprinting!
             e.flankPhase += dt * 4.2;
             const side = Math.sin(e.flankPhase) * 0.62;
             const sx = -moveVz * side;
@@ -3342,7 +3971,6 @@ export class MinatoEngine {
             moveVx /= ml;
             moveVz /= ml;
           } else if (e.policy === 'charger' && !lured && dist < 4.2 && e.specialCd <= 0) {
-            // Tank begins telegraphed ground slam!
             shouldMove = false;
             e.specialCd = 3.2;
             e.windupTimer = e.windupMax;
@@ -3392,13 +4020,12 @@ export class MinatoEngine {
               activeMeleeAttackers++;
               e.atkCd = e.boss ? 1.15 : 0.9;
               target.hp -= e.dmg;
-              this.audio.play('playerHurt');
               this.addTrauma(e.boss ? 0.52 : 0.24);
-              this.spawnBurst(target.x, 1.0, target.z, 0xff3b52, 6, 5, 0.25);
+              this.spawnBurst(target.x, getTerrainHeightAt(target.x, target.z) + 1.0, target.z, 0xff3b52, 6, 5, 0.25);
               if (target.hp <= 0) {
-                target.hp = 0;
-                target.down = true;
-                this.pushToast(`${target.name} РАНЕН! НУЖЕН МЕД-МАЯК [2]`, '#ff3b52');
+                this.downSquadMember(target, `${target.name} РАНЕН! ПОДОЙДИТЕ [E] ИЛИ МЕД-МАЯК [2]`);
+              } else {
+                this.audio.play('playerHurt');
               }
             }
           }
@@ -3418,7 +4045,7 @@ export class MinatoEngine {
         e.glbInstance.update(dt);
       }
 
-      e.vis.group.position.set(e.x, 0, e.z);
+      e.vis.group.position.set(e.x, getTerrainHeightAt(e.x, e.z), e.z);
       e.vis.group.rotation.y = e.yaw;
       if (!e.boss && e.hp < e.maxHp) {
         e.vis.hpBg.visible = true;
@@ -3515,7 +4142,7 @@ export class MinatoEngine {
       const wdz = wp.z - leader.z;
       const wDist = Math.hypot(wdx, wdz);
       this.waypointChevron.group.visible = wDist > 2.2;
-      this.waypointChevron.group.position.set(leader.x, 0, leader.z);
+      this.waypointChevron.group.position.set(leader.x, getTerrainHeightAt(leader.x, leader.z), leader.z);
       this.waypointChevron.group.rotation.y = Math.atan2(wdx, wdz);
       this.waypointChevron.mat.color.setHex(
         wp.kind === 'evac' ? 0x4ce0e8 : wp.kind === 'boss' ? 0xff3b52 : 0xf5b971,
@@ -3619,17 +4246,18 @@ export class MinatoEngine {
       }
     });
 
-    // Squad power surge: +35 HP, instant magazine refill, +2 flares, permanent +15% fire rate!
-    this.flareAmmo += 2;
+    // Squad power surge: +35 HP, full mag + reserve ammo, +2 flares, permanent +15% fire rate!
+    this.flareAmmo = Math.min(MAX_FLARE_AMMO, this.flareAmmo + 2);
     this.squad.forEach((m) => {
       if (!m.down) {
         m.hp = Math.min(m.maxHp, m.hp + 35);
         m.magAmmo = m.magMax;
+        m.reserveAmmo = m.reserveMax;
         m.reloading = false;
       }
     });
 
-    this.pushToast('⚡ ГЕНЕРАТОР B1 АКТИВЕН: +15% ТЕМП ОГНЯ, +2 ШАШКИ И ЭМИ-РАЗРЯД!', '#4ce0e8');
+    this.pushToast('⚡ ГЕНЕРАТОР B1 АКТИВЕН: +15% ТЕМП ОГНЯ, БОЕЗАПАС +2 ШАШКИ!', '#4ce0e8');
     this.emitHud();
   }
 
@@ -3668,14 +4296,16 @@ export class MinatoEngine {
 
     if (!this.inspectMode) {
       let tx = -2.0;
+      let ty = 1.5;
       let tz = 4.5;
       if (leader) {
-        tx = leader.x + Math.max(-4.5, Math.min(4.5, (this.aimPoint.x - leader.x) * 0.28));
-        tz = leader.z + Math.max(-4.5, Math.min(4.5, (this.aimPoint.z - leader.z) * 0.28));
+        tx = leader.x + Math.max(-4.5, Math.min(4.5, (this.aimPoint.x - leader.x) * 0.28)) + this.recoilKickX;
+        tz = leader.z + Math.max(-4.5, Math.min(4.5, (this.aimPoint.z - leader.z) * 0.28)) + this.recoilKickZ;
+        ty = getTerrainHeightAt(leader.x, leader.z) + 1.5;
       }
       this.camTarget.x += (tx - this.camTarget.x) * dampT;
       this.camTarget.z += (tz - this.camTarget.z) * dampT;
-      this.camTarget.y += (1.5 - this.camTarget.y) * dampT;
+      this.camTarget.y += (ty - this.camTarget.y) * dampT;
     }
 
     const horiz = Math.cos(this.camPitch) * this.camDist;
@@ -3749,6 +4379,86 @@ export class MinatoEngine {
     const evacUv = worldToMinimap(EVAC_ZONE.x, EVAC_ZONE.z);
     const holdUv = this.holdAnchor ? worldToMinimap(this.holdAnchor.x, this.holdAnchor.z) : null;
 
+    // Compute contextual [E] World Interact Prompt (Downed Ally Revive > Security Shutter)
+    let interactPrompt: InteractPromptHudState | null = null;
+    if (leader && this.state === 'playing' && !this.inspectMode) {
+      const downedAlly = this.squad.find(
+        (m) =>
+          m.down &&
+          !m.bledOut &&
+          Math.hypot(leader.x - m.x, leader.z - m.z) <= REVIVE_INTERACT_RADIUS,
+      );
+      if (downedAlly) {
+        interactPrompt = {
+          key: 'E',
+          kind: 'revive',
+          targetId: String(downedAlly.id),
+          label: `ПОДНЯТЬ: ${downedAlly.name}`,
+          sublabel:
+            leader.role === 'medic'
+              ? `Удерживайте [E] · Медик ×1.6 (${Math.ceil(downedAlly.bleedoutTimer)}с)`
+              : `Удерживайте [E] (${Math.ceil(downedAlly.bleedoutTimer)}с)`,
+          progress: downedAlly.reviveProgress,
+          accent: '#6ee782',
+        };
+      } else {
+        for (let i = 0; i < SHUTTER_SPECS.length; i++) {
+          const spec = SHUTTER_SPECS[i];
+          const st = this.shutterStates[i];
+          if (!st) continue;
+          const dPanel = Math.hypot(leader.x - spec.panelX, leader.z - spec.panelZ);
+          const dCenter = Math.hypot(leader.x - spec.x, leader.z - spec.z);
+          if (Math.min(dPanel, dCenter) <= SHUTTER_INTERACT_RADIUS) {
+            interactPrompt =
+              st.status === 'open'
+                ? {
+                    key: 'E',
+                    kind: 'shutter',
+                    targetId: spec.id,
+                    label: `ОПУСТИТЬ: ${spec.label}`,
+                    sublabel: 'Заблокировать проход орде на 10с',
+                    progress: 0,
+                    accent: '#4ce0e8',
+                  }
+                : st.status === 'sealed'
+                  ? {
+                      key: 'E',
+                      kind: 'shutter',
+                      targetId: spec.id,
+                      label: `${spec.label} ЗАКРЫТА`,
+                      sublabel: `Прочность ${Math.round((st.hp / st.maxHp) * 100)}% · ${Math.ceil(st.timer)}с`,
+                      progress: st.hp / st.maxHp,
+                      accent: '#f5b971',
+                    }
+                  : {
+                      key: 'E',
+                      kind: 'shutter',
+                      targetId: spec.id,
+                      label: `${spec.label} — ПЕРЕЗАГРУЗКА`,
+                      sublabel: `Готова через ${Math.ceil(st.timer)}с`,
+                      progress: 0,
+                      accent: '#ff5a72',
+                    };
+            break;
+          }
+        }
+      }
+    }
+
+    const shutterHudList = SHUTTER_SPECS.map((spec, i) => {
+      const st = this.shutterStates[i];
+      const uv = worldToMinimap(spec.x, spec.z);
+      return {
+        id: spec.id,
+        label: spec.label,
+        status: st ? st.status : ('open' as const),
+        timer: st ? st.timer : 0,
+        hpRatio: st ? st.hp / st.maxHp : 1,
+        u: uv.u,
+        v: uv.v,
+      };
+    });
+
     this.callbacks.onHudUpdate({
       state: this.state,
       phase: this.phase,
@@ -3771,6 +4481,9 @@ export class MinatoEngine {
       bossActive: Boolean(boss),
       bossHpPercent: boss ? Math.max(0, Math.round((boss.hp / boss.maxHp) * 100)) : 0,
       lowHpWarning,
+      spreadRatio: this.currentSpreadRatio,
+      interactPrompt,
+      shutters: shutterHudList,
       activeReload: leader
         ? {
             reloading: leader.reloading,
@@ -3781,6 +4494,8 @@ export class MinatoEngine {
             overchargeLeft: leader.overchargeTimer,
             magAmmo: leader.magAmmo,
             magMax: leader.magMax,
+            reserveAmmo: leader.reserveAmmo,
+            reserveMax: leader.reserveMax,
           }
         : {
             reloading: false,
@@ -3791,6 +4506,8 @@ export class MinatoEngine {
             overchargeLeft: 0,
             magAmmo: 0,
             magMax: 0,
+            reserveAmmo: 0,
+            reserveMax: 0,
           },
       generator: {
         active: this.b1GeneratorActive,
@@ -3826,6 +4543,7 @@ export class MinatoEngine {
               return { u: uv.u, v: uv.v, kind: 'ammo' as const };
             }),
         ],
+        shutters: shutterHudList,
         holdPoint: holdUv,
         generatorU: genUv.u,
         generatorV: genUv.v,
@@ -3838,12 +4556,15 @@ export class MinatoEngine {
         id: u.id,
         name: u.name,
         role: u.role,
+        weaponRoleLabel: u.weaponRoleLabel,
         color: u.color,
         hp: Math.round(u.hp),
         maxHp: u.maxHp,
         ghostHp: Math.round(u.ghostHp),
         magAmmo: u.magAmmo,
         magMax: u.magMax,
+        reserveAmmo: u.reserveAmmo,
+        reserveMax: u.reserveMax,
         reloading: u.reloading,
         overcharged: u.overchargeTimer > 0,
         skillName: u.skillName,
@@ -3851,6 +4572,9 @@ export class MinatoEngine {
         skillCd: u.skillCd,
         skillMaxCd: u.skillMaxCd,
         down: u.down,
+        bleedoutTimer: u.bleedoutTimer,
+        bleedoutMax: DOWNED_BLEEDOUT_SEC,
+        reviveProgress: u.reviveProgress,
         active: idx === this.activeIdx,
       })),
       assetSlots: this.assetPipeline.getSnapshot(),
@@ -3862,29 +4586,26 @@ export class MinatoEngine {
     this.keysHeld.clear();
     this.mouseDown = false;
     this.dragOrbit = false;
+    this.rightDragOrbit = false;
+    this.reviveButtonHeld = false;
   }
 
   private handleResize(): void {
     if (this.disposed) return;
     const w = Math.max(1, this.container.clientWidth || window.innerWidth);
     const h = Math.max(1, this.container.clientHeight || window.innerHeight);
+    if (w === this.lastViewportW && h === this.lastViewportH) return;
+    this.lastViewportW = w;
+    this.lastViewportH = h;
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
-    if (this.composer) {
-      this.composer.setSize(w, h);
-    }
-    if (this.bloomPass) {
-      const scale = this.isSoftwareGl ? 0.5 : 1.0;
-      this.bloomPass.resolution.set(Math.max(64, Math.floor(w * scale)), Math.max(64, Math.floor(h * scale)));
-    }
-    if (this.normalDepthTarget && this.gradePass) {
-      const ndScale = this.isSoftwareGl ? 0.75 : 1.0;
-      const ndW = Math.max(64, Math.floor(w * ndScale));
-      const ndH = Math.max(64, Math.floor(h * ndScale));
-      this.normalDepthTarget.setSize(ndW, ndH);
-      this.gradePass.uniforms.uTexelSize.value.set(1 / ndW, 1 / ndH);
-    }
+    this.renderer.setViewport(0, 0, w, h);
+    this.renderer.setScissorTest(false);
+    // Cleanly rebuild HalfFloat EffectComposer & Depth/Normal targets on resize to prevent WebGL viewport artifacts
+    this.disposePostProcessing();
+    this.setupPostProcessing(w, h);
+    this.applyPostProcessMood(this.mood);
     this.renderFrame();
   }
 
@@ -3920,6 +4641,7 @@ export class MinatoEngine {
       else if (e.code === 'Digit4') this.triggerSkill(3);
       else if (e.code === 'KeyR') this.triggerReload();
       else if (e.code === 'KeyQ') this.cycleStance();
+      else if (e.code === 'KeyE') this.triggerInteract();
       else if (e.code === 'KeyF') this.throwFlare();
       else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'Space') {
         if (!this.inspectMode) {
@@ -3950,16 +4672,25 @@ export class MinatoEngine {
     this.mouseNDC.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.mouseNDC.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
-    if (this.inspectMode && this.dragOrbit) {
+    if ((this.inspectMode && this.dragOrbit) || this.rightDragOrbit) {
       this.camYaw -= (e.clientX - this.prevDragX) * 0.006;
-      this.camPitch = Math.max(0.14, Math.min(1.22, this.camPitch + (e.clientY - this.prevDragY) * 0.005));
+      if (this.inspectMode) {
+        this.camPitch = Math.max(0.14, Math.min(1.22, this.camPitch + (e.clientY - this.prevDragY) * 0.005));
+      }
       this.prevDragX = e.clientX;
       this.prevDragY = e.clientY;
     }
   };
 
   private onMouseDown = (e: MouseEvent): void => {
-    if (e.button !== 0 || this.state !== 'playing') return;
+    if (this.state !== 'playing') return;
+    if (e.button === 2) {
+      this.rightDragOrbit = true;
+      this.prevDragX = e.clientX;
+      this.prevDragY = e.clientY;
+      return;
+    }
+    if (e.button !== 0) return;
     this.audio.unlock();
     if (this.inspectMode) {
       this.dragOrbit = true;
@@ -3973,6 +4704,11 @@ export class MinatoEngine {
   private onMouseUp = (): void => {
     this.mouseDown = false;
     this.dragOrbit = false;
+    this.rightDragOrbit = false;
+  };
+
+  private onContextMenu = (e: MouseEvent): void => {
+    e.preventDefault();
   };
 
   private onWheel = (e: WheelEvent): void => {
@@ -3996,6 +4732,7 @@ export class MinatoEngine {
     document.addEventListener('visibilitychange', this.onVisibilityChange);
     this.renderer.domElement.addEventListener('mousemove', this.onMouseMove);
     this.renderer.domElement.addEventListener('mousedown', this.onMouseDown);
+    this.renderer.domElement.addEventListener('contextmenu', this.onContextMenu);
     this.renderer.domElement.addEventListener('wheel', this.onWheel, { passive: true });
   }
 
@@ -4007,6 +4744,7 @@ export class MinatoEngine {
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
     this.renderer.domElement.removeEventListener('mousemove', this.onMouseMove);
     this.renderer.domElement.removeEventListener('mousedown', this.onMouseDown);
+    this.renderer.domElement.removeEventListener('contextmenu', this.onContextMenu);
     this.renderer.domElement.removeEventListener('wheel', this.onWheel);
   }
 }
