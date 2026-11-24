@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
+import { AssetLabView } from './components/AssetLabView';
 import { GameHud } from './components/GameHud';
 import { StatusModal } from './components/StatusModal';
 import { TitleOverlay } from './components/TitleOverlay';
 import { MinatoEngine } from './game/MinatoEngine';
 import type { HudSnapshot, ToastMessage } from './game/types';
+import type { LabViewMode } from './lab/assets/index';
 
 const INITIAL_HUD: HudSnapshot = {
   state: 'title',
@@ -63,7 +65,40 @@ const INITIAL_HUD: HudSnapshot = {
   summary: null,
 };
 
+function parseInitialLabParams(): { openLab: boolean; initialMode: LabViewMode } {
+  const params = new URLSearchParams(window.location.search);
+  const openLab = params.get('lab') === '1';
+  const raw = params.get('asset');
+  const initialMode: LabViewMode =
+    raw === 'sedan' ||
+    raw === 'building' ||
+    raw === 'vending' ||
+    raw === 'civilian' ||
+    raw === 'infected' ||
+    raw === 'all'
+      ? raw
+      : 'sedan';
+  return { openLab, initialMode };
+}
+
 export default function App() {
+  const initial = parseInitialLabParams();
+  const [view, setView] = useState<'game' | 'lab'>(initial.openLab ? 'lab' : 'game');
+  const [labInitialMode] = useState<LabViewMode>(initial.initialMode);
+
+  if (view === 'lab') {
+    return (
+      <AssetLabView
+        initialMode={labInitialMode}
+        onExitToGame={() => setView('game')}
+      />
+    );
+  }
+
+  return <MinatoGameView onOpenAssetLab={() => setView('lab')} />;
+}
+
+function MinatoGameView({ onOpenAssetLab }: { onOpenAssetLab: () => void }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<MinatoEngine | null>(null);
   const toastTimerRef = useRef<number | null>(null);
@@ -124,6 +159,7 @@ export default function App() {
           mood={hud.mood}
           onStart={() => engineRef.current?.startGame()}
           onCycleMood={() => engineRef.current?.cycleMood()}
+          onOpenAssetLab={onOpenAssetLab}
         />
       )}
 

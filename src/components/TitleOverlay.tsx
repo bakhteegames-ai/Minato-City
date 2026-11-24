@@ -4,6 +4,7 @@ interface TitleOverlayProps {
   mood: LightingMood;
   onStart: () => void;
   onCycleMood: () => void;
+  onOpenAssetLab: () => void;
 }
 
 const MOOD_LABELS: Record<LightingMood, string> = {
@@ -12,7 +13,7 @@ const MOOD_LABELS: Record<LightingMood, string> = {
   mist: 'Портовый туман',
 };
 
-export function TitleOverlay({ mood, onStart, onCycleMood }: TitleOverlayProps) {
+export function TitleOverlay({ mood, onStart, onCycleMood, onOpenAssetLab }: TitleOverlayProps) {
   return (
     <div
       className="fixed inset-0 z-20 pointer-events-none flex flex-col justify-between p-6 sm:p-10"
@@ -116,6 +117,18 @@ export function TitleOverlay({ mood, onStart, onCycleMood }: TitleOverlayProps) 
             className="font-display cursor-pointer bg-[#141a30]/95 hover:bg-[#1d2645] text-[#4ce0e8] font-semibold tracking-[0.1em] uppercase text-xs px-4 py-3.5 border border-[#4ce0e8]/45 shadow-[3px_3px_0_#0b0e1c] transition-colors"
           >
             {MOOD_LABELS[mood]}
+          </button>
+
+          <button
+            type="button"
+            data-open-lab="true"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              onOpenAssetLab();
+            }}
+            className="font-display cursor-pointer bg-[#191d28]/95 hover:bg-[#252c3b] text-[#e6b35a] font-semibold tracking-[0.12em] uppercase text-xs px-4 py-3.5 border border-[#e6b35a]/55 shadow-[3px_3px_0_#0b0e1c] transition-colors"
+          >
+            Asset Lab · 3D
           </button>
         </div>
       </div>
